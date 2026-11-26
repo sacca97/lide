@@ -173,12 +173,16 @@ fn push_inline_text(inlines: &[Inline], out: &mut String) {
 /// Collect the headings of a document into an outline.
 pub fn outline(blocks: &[Block]) -> Vec<OutlineEntry> {
     let mut entries = Vec::new();
-    let mut used: Vec<String> = Vec::new();
+    let mut used = std::collections::HashSet::new();
     collect_outline(blocks, &mut entries, &mut used);
     entries
 }
 
-fn collect_outline(blocks: &[Block], entries: &mut Vec<OutlineEntry>, used: &mut Vec<String>) {
+fn collect_outline(
+    blocks: &[Block],
+    entries: &mut Vec<OutlineEntry>,
+    used: &mut std::collections::HashSet<String>,
+) {
     for block in blocks {
         match block {
             Block::Heading { level, content, .. } => {
@@ -223,7 +227,7 @@ pub fn slugify(text: &str) -> String {
     out
 }
 
-pub fn unique_anchor(base: &str, used: &mut Vec<String>) -> String {
+pub fn unique_anchor(base: &str, used: &mut std::collections::HashSet<String>) -> String {
     if base.is_empty() {
         return String::new();
     }
@@ -233,7 +237,7 @@ pub fn unique_anchor(base: &str, used: &mut Vec<String>) -> String {
         counter += 1;
         candidate = format!("{base}-{counter}");
     }
-    used.push(candidate.clone());
+    used.insert(candidate.clone());
     candidate
 }
 

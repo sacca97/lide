@@ -3,4 +3,4 @@
 *.pdb
 .idea/
 .vscode/
-third_party/
+third_party/pdfium/

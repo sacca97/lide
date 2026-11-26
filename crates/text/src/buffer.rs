@@ -156,16 +156,26 @@ impl TextBuffer {
         self.text.clone()
     }
 
+    /// Consume the buffer, returning its text without a copy.
+    pub fn into_text(self) -> String {
+        self.text
+    }
+
     /// The bytes to write to disk for this document.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = self.encoding.bom().to_vec();
-        bytes.extend_from_slice(self.line_ending.apply(&self.text).as_bytes());
+        let text = self.line_ending.apply(&self.text);
+        let mut bytes = Vec::with_capacity(self.encoding.bom().len() + text.len());
+        bytes.extend_from_slice(self.encoding.bom());
+        bytes.extend_from_slice(text.as_bytes());
         bytes
     }
 }
 
 /// Convert CRLF and lone CR to LF.
 pub(crate) fn normalize_newlines(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {

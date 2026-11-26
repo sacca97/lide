@@ -45,6 +45,8 @@ pdf = { version = "0.10", default-features = false }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # --- Platform -----------------------------------------------------------------
 dirs = "6"
@@ -53,6 +55,11 @@ dirs = "6"
 # (a transitive dependency of the PDF renderer's HTTP client) still
 # references. See docs/adr/0004-pdf-rendering.md.
 libc = "=0.2.189"
+
+# Tests and dev builds do not need full debug info: it is what makes every
+# test binary slow to link against the GPU stack.
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3

@@ -13,7 +13,7 @@
 sudo dnf install -y \
     vulkan-loader vulkan-tools mesa-vulkan-drivers \
     wayland-devel libxkbcommon-devel libxkbcommon-x11 \
-    fontconfig-devel
+    fontconfig-devel zlib-devel gcc
 ```
 
 ### Debian / Ubuntu
@@ -22,7 +22,7 @@ sudo dnf install -y \
 sudo apt-get install -y \
     libvulkan1 mesa-vulkan-drivers \
     libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 \
-    fontconfig-dev
+    fontconfig-dev zlib1g-dev build-essential
 ```
 
 `libwayland-dev` and `libxkbcommon-dev` are needed at build time because
@@ -53,6 +53,57 @@ The pieces the editor depends on are portable: Rune's Cocoa backend,
 "Reveal in file manager", and the external tools on `PATH`. **This repository
 has not been built or exercised on macOS**, so treat it as best-effort and
 report what breaks.
+
+### Cross-compiling for Apple Silicon from Linux
+
+A plain `cargo build --target aarch64-apple-darwin` is not enough. The target
+standard library is installable with `rustup`, but several dependencies build C
+(notably `blake3`) and the app links Cocoa/Metal frameworks. A native Linux
+`cc` rejects Apple flags such as `-arch`; the failure appears in a build script
+before the editor's own code is reached.
+
+Use one of these instead:
+
+1. **Build on an Apple Silicon Mac.** This is the supported path:
+   ```sh
+   rustup target add aarch64-apple-darwin   # only needed when cross-building on Intel
+   cargo build --release --target aarch64-apple-darwin
+   ```
+2. **Cross-build with osxcross and a macOS SDK.** The SDK comes from Xcode
+   and must be obtained under Apple's licence. Point both the C compiler used
+   by build scripts and Cargo's linker at osxcross:
+   ```sh
+   export CC_aarch64_apple_darwin=/path/to/osxcross/target/bin/oa64-clang
+   export CXX_aarch64_apple_darwin=/path/to/osxcross/target/bin/oa64-clang++
+   export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=/path/to/osxcross/target/bin/aarch64-apple-darwin-clang
+   export MACOSX_DEPLOYMENT_TARGET=11.0
+   cargo build --release --target aarch64-apple-darwin
+   ```
+
+`cargo-zigbuild` alone is not enough: Zig can emit Mach-O, but the AppKit,
+Metal, CoreText and similar frameworks still need the Apple SDK's stubs.
+
+PDFium is optional at build time. On the Mac run:
+
+```sh
+./scripts/fetch-pdfium.sh
+```
+
+The script selects `pdfium-mac-arm64.tgz`, verifies its pinned SHA-256 and
+installs `libpdfium.dylib`. A native build then embeds that library in the
+executable, so the result can be distributed on its own.
+
+For a cross build from Linux, the checkout's library belongs to the host, so
+name the target library explicitly:
+
+```sh
+export LIDE_EMBED_PDFIUM=/path/to/pdfium-mac-arm64/lib/libpdfium.dylib
+cargo build --release --target aarch64-apple-darwin
+```
+
+Set `LIDE_EMBED_PDFIUM=0` to leave PDFium out of the executable and use the
+runtime lookup instead. `.app` bundling, code signing and notarisation are not
+set up here.
 
 ## Cleaning the build cache
 
@@ -104,15 +155,24 @@ PDF support needs the PDFium shared library. It is not vendored: fetch it with
 ```
 
 which downloads the official prebuilt binary, checks it against a pinned
-SHA-256 and writes it to `third_party/pdfium/lib/`. The editor finds it there
-when it runs from the project directory. To use a different copy:
+SHA-256 and writes it to `third_party/pdfium/lib/`. A native build then embeds
+that library in `lide`, so the executable is self-contained: on first use the
+library is written to the user's cache and loaded.
+
+Embedding happens only when the library is present at build time. Set
+`LIDE_EMBED_PDFIUM=0` to build without it, or set it to a library path to embed
+a different copy (for example, a macOS dylib when cross-compiling). At runtime
+`LIDE_PDFIUM_PATH`, `PDFIUM_LIBRARY_PATH`, and a library beside the executable
+or in the checkout take precedence over the embedded copy. To use a different
+copy without rebuilding:
 
 ```sh
 export LIDE_PDFIUM_PATH=/path/to/libpdfium.so
 ```
 
-Without PDFium the editor still opens PDFs and reports their page count; the
-viewer says that PDFium is missing rather than failing to open the file.
+Without an embedded or runtime PDFium the editor still opens PDFs and reports
+their page count; the viewer says that PDFium is missing rather than failing to
+open the file.
 
 ## Running
 
@@ -186,3 +246,7 @@ cargo run -p lide -- --tree /tmp/tree.json <path>
 ```
 
 The windowed binary is for the person at the keyboard.
+
+The SyncTeX parser (`third_party/synctex`) is C and is built by `cargo build`
+with the system C compiler and zlib, which is why `gcc` and the zlib
+development package are in the lists above.

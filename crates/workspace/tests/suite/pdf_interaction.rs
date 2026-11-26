@@ -20,28 +20,7 @@ fn pdf_guard() -> MutexGuard<'static, ()> {
 }
 
 fn isolate_settings() {
-    use std::sync::OnceLock;
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let directory = std::env::temp_dir().join("lide-test-config-pdf-interaction");
-        let _ = std::fs::create_dir_all(&directory);
-        // SAFETY: this runs once, before any test touches the settings.
-        unsafe { std::env::set_var("LIDE_CONFIG_DIR", &directory) };
-        // The test binary runs in `deps`, where the viewer's own discovery
-        // does not find the vendored library.
-        let name = format!(
-            "{}pdfium{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_SUFFIX
-        );
-        let library = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../third_party/pdfium/lib")
-            .join(name);
-        if library.exists() {
-            // SAFETY: once, before any PDF is opened.
-            unsafe { std::env::set_var("LIDE_PDFIUM_PATH", library) };
-        }
-    });
+    crate::isolate_settings();
 }
 
 fn runtime() -> Runtime<Workspace> {
@@ -291,6 +270,7 @@ fn double_clicking_a_pdf_page_asks_for_the_source() {
     open_pdf(&mut rt);
     let rect = page_rect(&rt);
     let (x, y) = (rect[0] + 120.0, rect[1] + 60.0);
+    rt.pointer_move(x, y);
     for _ in 0..2 {
         rt.button_down(x, y, PointerButton::Primary);
         rt.button_up(x, y, PointerButton::Primary);
@@ -299,6 +279,10 @@ fn double_clicking_a_pdf_page_asks_for_the_source() {
     rt.state.poll();
 
     assert!(!pdf(&rt).double_click, "the request was handled");
+    assert!(
+        pdf(&rt).pointer.is_some(),
+        "the page records where the double click landed"
+    );
     assert!(
         rt.state.notice.is_some(),
         "the inverse SyncTeX attempt reports its result"

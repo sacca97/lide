@@ -21,8 +21,11 @@ Two libraries, with different jobs:
   at runtime with `libloading`.
 
 The library is fetched by `scripts/fetch-pdfium.sh`, which checks it against a
-pinned SHA-256, and written to `third_party/pdfium/lib/`. The editor finds it
-there, or at `$LIDE_PDFIUM_PATH`, or at `$PDFIUM_LIBRARY_PATH`.
+pinned SHA-256, and written to `third_party/pdfium/lib/`. A native build embeds
+those bytes in the executable and extracts them to the user's cache on first
+use, so a distributed binary does not need a loose library. The runtime search
+still accepts an external copy at `$LIDE_PDFIUM_PATH`, at
+`$PDFIUM_LIBRARY_PATH`, or beside the executable.
 
 ## Why PDFium
 
@@ -44,11 +47,13 @@ which is what text selection and search need.
   libpng, zlib, ICU, HarfBuzz and others). Those notices have to travel with
   any distribution that includes the library.
 * The library is about 8 MiB and is not vendored into the repository. The
-  fetch script and the checksum are the reproducible way to get it.
+  fetch script and the checksum are the reproducible way to get it. A native
+  build embeds the fetched library, which grows the executable by about the
+  same amount; `LIDE_EMBED_PDFIUM=0` keeps the library external.
 * `pdfium-render` 0.9 does not expose its dynamic loader publicly, so the
   binding goes through the public `Pdfium::bind_to_library`.
-* PDF support is a default feature, but the *library* is only needed at
-  runtime. Without it the editor opens PDFs, reports the page count and says
+* PDF support is a default feature. If no library was embedded and none is
+  found at runtime, the editor opens PDFs, reports the page count and says
   that PDFium is missing, rather than refusing the file.
 * Pages are rendered on a background thread; the first page is rendered when
   the document is opened so that something appears immediately. The rendered

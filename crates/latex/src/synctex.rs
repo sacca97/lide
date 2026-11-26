@@ -1,11 +1,58 @@
 //! SyncTeX: the map between a source line and a place on the PDF page.
 //!
-//! The TeX distribution ships a `synctex` command line tool that reads the
-//! `.synctex.gz` a build writes. This module drives it and parses what it
-//! prints; both directions are used, source to PDF and PDF back to source.
+//! The work is done by the reference parser, `synctex_parser.c` from TeX Live,
+//! vendored in `third_party/synctex` and built by `build.rs`. It is the code
+//! Okular, Zathura, TeXworks and most other viewers use, so its idea of the
+//! nearest node, of how TeX's units become PDF points and of how a box is
+//! closed on another line than its text is the one everybody else has.
 
+use std::ffi::{c_char, c_float, c_int, c_long, CStr, CString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+#[repr(C)]
+struct Scanner {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct Node {
+    _private: [u8; 0],
+}
+
+extern "C" {
+    fn synctex_scanner_new_with_output_file(
+        output: *const c_char,
+        build_directory: *const c_char,
+        parse: c_int,
+    ) -> *mut Scanner;
+    fn synctex_scanner_free(scanner: *mut Scanner) -> c_int;
+    fn synctex_display_query(
+        scanner: *mut Scanner,
+        name: *const c_char,
+        line: c_int,
+        column: c_int,
+        page_hint: c_int,
+    ) -> c_long;
+    fn synctex_edit_query(scanner: *mut Scanner, page: c_int, h: c_float, v: c_float) -> c_long;
+    fn synctex_scanner_next_result(scanner: *mut Scanner) -> *mut Node;
+    fn synctex_scanner_get_name(scanner: *mut Scanner, tag: c_int) -> *const c_char;
+    fn synctex_node_tag(node: *mut Node) -> c_int;
+    fn synctex_node_line(node: *mut Node) -> c_int;
+    fn synctex_node_column(node: *mut Node) -> c_int;
+    fn synctex_node_page(node: *mut Node) -> c_int;
+    fn synctex_node_visible_h(node: *mut Node) -> c_float;
+    fn synctex_node_visible_v(node: *mut Node) -> c_float;
+}
+
+/// A parsed SyncTeX file, freed when dropped.
+struct Handle(*mut Scanner);
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from the scanner constructor and is freed once.
+        unsafe { synctex_scanner_free(self.0) };
+    }
+}
 
 /// Where a source line is on the page.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,29 +76,44 @@ pub struct SyncSource {
     pub column: u64,
 }
 
-/// The SyncTeX tool.
+/// The SyncTeX data for a build.
 #[derive(Debug, Clone)]
 pub struct SyncTex {
-    /// The program to run.
-    pub program: String,
-    /// Where to run it: the directory the build ran in.
+    /// Where the build ran.
     pub directory: PathBuf,
 }
 
+fn c_path(path: &Path) -> Result<CString, String> {
+    CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| format!("{} is not a usable path", path.display()))
+}
+
 impl SyncTex {
-    /// The tool for a build directory.
+    /// The map for a build directory.
     pub fn new(directory: impl AsRef<Path>) -> Self {
         Self {
-            program: "synctex".to_string(),
             directory: directory.as_ref().to_path_buf(),
         }
     }
 
+    fn open(&self, pdf: &Path) -> Result<Handle, String> {
+        let output = c_path(pdf)?;
+        let directory = c_path(&self.directory)?;
+        // SAFETY: both strings outlive the call; a null result is an error.
+        let scanner =
+            unsafe { synctex_scanner_new_with_output_file(output.as_ptr(), directory.as_ptr(), 1) };
+        if scanner.is_null() {
+            return Err(format!(
+                "no readable .synctex.gz or .synctex for {}; rebuild the document",
+                pdf.display()
+            ));
+        }
+        Ok(Handle(scanner))
+    }
+
     /// Where `line` of `tex` lands on `pdf`.
     ///
-    /// `None` when SyncTeX knows nothing about that line — which happens when
-    /// the build did not write a `.synctex.gz`, or when the line is in a part
-    /// of the source that produced no output.
+    /// `None` when the file has no record for that line or a nearby line.
     pub fn forward(
         &self,
         tex: &Path,
@@ -59,12 +121,36 @@ impl SyncTex {
         column: u64,
         pdf: &Path,
     ) -> Result<Option<SyncPoint>, String> {
-        let input = format!("{}:{}:{}", line, column, tex.to_string_lossy());
-        let output = self.run(&["view", "-i", &input, "-o", &pdf.to_string_lossy()])?;
-        Ok(parse_view(&output))
+        let handle = self.open(pdf)?;
+        let name = c_path(tex)?;
+        // SAFETY: the scanner and the name are valid for these calls, and the
+        // nodes are only read before the next query.
+        unsafe {
+            let count = synctex_display_query(
+                handle.0,
+                name.as_ptr(),
+                line.min(i32::MAX as u64) as c_int,
+                column.min(i32::MAX as u64) as c_int,
+                -1,
+            );
+            if count <= 0 {
+                return Ok(None);
+            }
+            let node = synctex_scanner_next_result(handle.0);
+            if node.is_null() {
+                return Ok(None);
+            }
+            Ok(Some(SyncPoint {
+                page: synctex_node_page(node).max(1) as u32,
+                x: synctex_node_visible_h(node),
+                y: synctex_node_visible_v(node),
+            }))
+        }
     }
 
     /// Where a place on `page` of `pdf` came from.
+    ///
+    /// The point is in PDF points, measured from the top of the page.
     pub fn inverse(
         &self,
         pdf: &Path,
@@ -72,162 +158,109 @@ impl SyncTex {
         x: f32,
         y: f32,
     ) -> Result<Option<SyncSource>, String> {
-        let output = format!("{}:{x}:{y}:{}", page, pdf.to_string_lossy());
-        let text = self.run(&["edit", "-o", &output])?;
-        Ok(parse_edit(&text, &self.directory))
-    }
-
-    fn run(&self, args: &[&str]) -> Result<String, String> {
-        let output = Command::new(&self.program)
-            .args(args)
-            .current_dir(&self.directory)
-            .output()
-            .map_err(|error| format!("could not run {}: {error}", self.program))?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    }
-}
-
-/// Parse `synctex view` output.
-///
-/// The tool prints a `SyncTeX result begin` block of `Key:value` lines. Only
-/// the first result is used: a source line usually has one place, and the
-/// first is the best.
-pub fn parse_view(text: &str) -> Option<SyncPoint> {
-    let mut page = None;
-    let mut x = None;
-    let mut y = None;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line == "SyncTeX result end" {
-            break;
-        }
-        if let Some(value) = line.strip_prefix("Page:") {
-            page = value.trim().parse::<u32>().ok();
-        } else if let Some(value) = line.strip_prefix("x:") {
-            // `x` and `y` are the *first* result's; later ones are ignored.
-            if x.is_none() {
-                x = value.trim().parse::<f32>().ok();
+        let handle = self.open(pdf)?;
+        // SAFETY: as above; the name is copied before the scanner is dropped.
+        unsafe {
+            let count = synctex_edit_query(handle.0, page as c_int, x, y);
+            if count <= 0 {
+                return Ok(None);
             }
-        } else if let Some(value) = line.strip_prefix("y:") {
-            if y.is_none() {
-                y = value.trim().parse::<f32>().ok();
+            let node = synctex_scanner_next_result(handle.0);
+            if node.is_null() {
+                return Ok(None);
             }
-        }
-        if page.is_some() && x.is_some() && y.is_some() {
-            break;
-        }
-    }
-
-    Some(SyncPoint {
-        page: page?,
-        x: x?,
-        y: y?,
-    })
-}
-
-/// Parse `synctex edit` output.
-pub fn parse_edit(text: &str, directory: &Path) -> Option<SyncSource> {
-    let mut path = None;
-    let mut line = None;
-    let mut column = Some(0u64);
-
-    for raw in text.lines() {
-        let raw = raw.trim();
-        if raw == "SyncTeX result end" {
-            break;
-        }
-        if let Some(value) = raw.strip_prefix("Input:") {
-            path = Some(value.trim().to_string());
-        } else if let Some(value) = raw.strip_prefix("Line:") {
-            line = value.trim().parse::<u64>().ok();
-        } else if let Some(value) = raw.strip_prefix("Column:") {
-            column = value.trim().parse::<u64>().ok().or(Some(0));
-        }
-        if path.is_some() && line.is_some() {
-            break;
+            let name = synctex_scanner_get_name(handle.0, synctex_node_tag(node));
+            if name.is_null() {
+                return Ok(None);
+            }
+            let name = PathBuf::from(CStr::from_ptr(name).to_string_lossy().into_owned());
+            let path = if name.is_absolute() {
+                name
+            } else {
+                self.directory.join(name)
+            };
+            // TeX writes `dir/./file`; collecting the components drops the dot.
+            let path: PathBuf = path.components().collect();
+            Ok(Some(SyncSource {
+                path,
+                line: synctex_node_line(node).max(1) as u64,
+                column: synctex_node_column(node).max(0) as u64,
+            }))
         }
     }
-
-    let path = PathBuf::from(path?);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        directory.join(path)
-    };
-    Some(SyncSource {
-        path,
-        line: line?,
-        column: column.unwrap_or(0),
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const VIEW: &str = "\
-This is SyncTeX command line utility, version 1.5
-SyncTeX result begin
-Output:main.pdf
-Page:3
-x:133.768997
-y:134.764618
-h:133.768997
-v:134.764618
-W:266.000000
-H:8.000000
-SyncTeX result end
+    fn scratch() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("lide-synctex-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&directory);
+        directory
+    }
+
+    const SIMPLE: &str = "\
+SyncTeX Version:1
+Input:1:/work/paper/main.tex
+Output:pdf
+Magnification:1000
+Unit:1
+X Offset:0
+Y Offset:0
+Content:
+{1
+[1,1:0,0:39158276,55380990,0
+(1,2:3552215,18442772:15795512,444328,141880
+x1,2:4571361,18442772
+x1,1:5429155,18442772
+x1,1:6453622,18442772
+)
+(1,1:3552215,33984329:15795512,541848,9432
+x1,1:3945431,33984329
+x1,1:6086078,33984329
+)
+]
+}1
+Postamble:
+Count:2
+Post scriptum:
 ";
 
-    const EDIT: &str = "\
-This is SyncTeX command line utility, version 1.5
-SyncTeX result begin
-Input:/work/paper/main.tex
-Line:42
-Column:0
-Offset:0
-Context:
-SyncTeX result end
-";
-
-    #[test]
-    fn a_forward_result_gives_a_page_and_a_point() {
-        let point = parse_view(VIEW).expect("a point");
-        assert_eq!(point.page, 3);
-        assert!((point.x - 133.769).abs() < 0.01);
-        assert!((point.y - 134.765).abs() < 0.01);
+    fn build(name: &str) -> (SyncTex, PathBuf) {
+        let directory = scratch();
+        let pdf = directory.join(format!("{name}.pdf"));
+        std::fs::write(&pdf, b"%PDF-1.4\n").unwrap();
+        std::fs::write(directory.join(format!("{name}.synctex")), SIMPLE).unwrap();
+        (SyncTex::new(&directory), pdf)
     }
 
     #[test]
-    fn an_inverse_result_gives_a_file_and_a_line() {
-        let source = parse_edit(EDIT, Path::new("/work/paper")).expect("a source");
+    fn a_missing_file_is_an_error_not_a_panic() {
+        let directory = scratch();
+        let result = SyncTex::new(&directory).inverse(&directory.join("none.pdf"), 1, 10.0, 10.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn forward_finds_a_line_on_the_page() {
+        let (synctex, pdf) = build("forward");
+        let point = synctex
+            .forward(Path::new("/work/paper/main.tex"), 1, 0, &pdf)
+            .expect("the file parses")
+            .expect("line 1 is mapped");
+        assert_eq!(point.page, 1);
+        assert!(point.y > 0.0 && point.x > 0.0);
+    }
+
+    #[test]
+    fn inverse_goes_back_to_the_source() {
+        let (synctex, pdf) = build("inverse");
+        let source = synctex
+            .inverse(&pdf, 1, 90.0, 285.0)
+            .expect("the file parses")
+            .expect("the point is on text");
         assert_eq!(source.path, Path::new("/work/paper/main.tex"));
-        assert_eq!(source.line, 42);
-        assert_eq!(source.column, 0);
-    }
-
-    #[test]
-    fn a_relative_input_path_is_joined_to_the_build_directory() {
-        let text = "SyncTeX result begin\nInput:main.tex\nLine:7\nSyncTeX result end\n";
-        let source = parse_edit(text, Path::new("/work")).unwrap();
-        assert_eq!(source.path, Path::new("/work/main.tex"));
-    }
-
-    #[test]
-    fn an_empty_result_is_none() {
-        let text = "SyncTeX result begin\nSyncTeX result end\n";
-        assert!(parse_view(text).is_none());
-        assert!(parse_edit(text, Path::new("/work")).is_none());
-    }
-
-    #[test]
-    fn the_tool_runs_in_the_build_directory() {
-        let synctex = SyncTex::new("/work/paper");
-        assert_eq!(synctex.program, "synctex");
-        assert_eq!(synctex.directory, Path::new("/work/paper"));
+        assert!(source.line == 1 || source.line == 2);
     }
 }

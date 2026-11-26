@@ -11,5 +11,4 @@ description = "A PTY-backed terminal: process management and a VT emulator."
 alacritty_terminal = "0.26"
 rune.workspace = true
 portable-pty = "0.9"
-log.workspace = true
 thiserror.workspace = true

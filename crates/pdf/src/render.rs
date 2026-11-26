@@ -112,7 +112,7 @@ fn pdfium(path: Option<&Path>) -> Result<&'static Pdfium, PdfError> {
     let loaded = ENGINE.get_or_init(|| {
         let path = match path {
             Some(path) => path.to_path_buf(),
-            None => locate_pdfium().ok_or_else(|| {
+            None => locate_pdfium().or_else(embedded_pdfium).ok_or_else(|| {
                 "PDFium was not found. Run scripts/fetch-pdfium.sh or set LIDE_PDFIUM_PATH."
                     .to_string()
             })?,
@@ -282,6 +282,92 @@ fn walk_bookmarks(bookmark: &PdfBookmark<'_>, depth: usize, out: &mut Vec<(Strin
     for child in bookmark.iter_direct_children() {
         walk_bookmarks(&child, depth + 1, out);
     }
+}
+
+/// PDFium carried inside this executable, when the build found a library.
+#[cfg(embed_pdfium)]
+static EMBEDDED_PDFIUM: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/",
+    env!("LIDE_EMBEDDED_PDFIUM_NAME")
+));
+
+/// Write the embedded library to the cache and return the file to load.
+///
+/// The hash in the name makes a new build replace an older library without
+/// touching a copy another window is using. The write goes through a temporary
+/// file and a rename so a second process never sees half a library.
+#[cfg(embed_pdfium)]
+fn embedded_pdfium() -> Option<PathBuf> {
+    use std::io::Write;
+
+    if EMBEDDED_PDFIUM.is_empty() {
+        return None;
+    }
+    let name = env!("LIDE_EMBEDDED_PDFIUM_NAME");
+    let hash = env!("LIDE_EMBEDDED_PDFIUM_HASH");
+    let root = pdfium_cache_directory();
+    let file = root.join(format!("{hash}-{name}"));
+    if std::fs::metadata(&file)
+        .map(|metadata| metadata.len() as usize == EMBEDDED_PDFIUM.len())
+        .unwrap_or(false)
+    {
+        return Some(file);
+    }
+
+    std::fs::create_dir_all(&root).ok()?;
+    let temporary = root.join(format!(".{hash}-{name}.tmp-{}", std::process::id()));
+    let mut handle = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
+    {
+        Ok(handle) => handle,
+        Err(_) => return None,
+    };
+    if handle.write_all(EMBEDDED_PDFIUM).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = handle.set_permissions(std::fs::Permissions::from_mode(0o755));
+    }
+    drop(handle);
+
+    if std::fs::rename(&temporary, &file).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        if !file.exists() {
+            return None;
+        }
+    }
+    Some(file)
+}
+
+#[cfg(not(embed_pdfium))]
+fn embedded_pdfium() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(embed_pdfium)]
+fn pdfium_cache_directory() -> PathBuf {
+    if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(path).join("lide/pdfium");
+    }
+    if cfg!(windows) {
+        if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(path).join("lide/pdfium");
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        if cfg!(target_os = "macos") {
+            return PathBuf::from(home).join("Library/Caches/lide/pdfium");
+        }
+        return PathBuf::from(home).join(".cache/lide/pdfium");
+    }
+    std::env::temp_dir().join("lide/pdfium")
 }
 
 /// Find the PDFium shared library.

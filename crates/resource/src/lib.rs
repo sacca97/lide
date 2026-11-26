@@ -49,18 +49,16 @@ impl Location {
 
     /// The last path component, for a tab title.
     pub fn file_name(&self) -> Option<&str> {
-        match self {
-            Self::Local(path) => path.file_name().and_then(|name| name.to_str()),
-            Self::Remote { path, .. } => path.file_name().and_then(|name| name.to_str()),
-        }
+        self.path_for_kind()
+            .file_name()
+            .and_then(|name| name.to_str())
     }
 
     /// The extension, for choosing a syntax and a viewer.
     pub fn extension(&self) -> Option<&str> {
-        match self {
-            Self::Local(path) => path.extension().and_then(|extension| extension.to_str()),
-            Self::Remote { path, .. } => path.extension().and_then(|extension| extension.to_str()),
-        }
+        self.path_for_kind()
+            .extension()
+            .and_then(|extension| extension.to_str())
     }
 
     /// The path used to choose a language: the local path or the remote one.

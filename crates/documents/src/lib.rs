@@ -73,7 +73,7 @@ pub fn sniff_kind(path: &Path) -> Option<DocumentKind> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(path).ok()?;
-    let mut header = [0u8; 8];
+    let mut header = [0u8; 12];
     let read = file.read(&mut header).ok()?;
     let header = &header[..read];
 

@@ -1976,21 +1976,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "env_logger",
- "lide-documents",
- "lide-editor",
  "lide-latex",
  "lide-lsp",
- "lide-markdown",
- "lide-pdf",
  "lide-platform",
- "lide-text",
  "lide-workspace",
  "log",
  "rune",
  "rune-edit",
  "rune-image",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2010,7 +2003,6 @@ version = "0.1.0"
 dependencies = [
  "lide-resource",
  "lide-text",
- "log",
  "rune-edit",
  "thiserror 2.0.21",
 ]
@@ -2026,6 +2018,7 @@ dependencies = [
 name = "lide-latex"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "thiserror 2.0.21",
 ]
 
@@ -2035,7 +2028,6 @@ version = "0.1.0"
 dependencies = [
  "lide-rpc",
  "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2049,12 +2041,10 @@ dependencies = [
 name = "lide-pdf"
 version = "0.1.0"
 dependencies = [
- "log",
  "pdf",
  "pdfium-render",
  "rune",
  "rune-edit",
- "rune-image",
  "rune-kit",
  "thiserror 2.0.21",
 ]
@@ -2108,7 +2098,6 @@ name = "lide-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
- "log",
  "portable-pty",
  "rune",
  "thiserror 2.0.21",

@@ -116,22 +116,39 @@ pub struct Client {
     /// The server's standard error, collected when the stream ends.
     stderr: mpsc::Receiver<String>,
     /// The last thing the server said on standard error.
-    last_stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    last_stderr: std::sync::Mutex<String>,
+}
+
+/// The `textDocument`/`position` pair several requests share.
+fn text_document_position(path: &Path, position: Position) -> Value {
+    json!({
+        "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
+        "position": { "line": position.line, "character": position.character }
+    })
+}
+
+/// Parse one LSP position.
+fn parse_position(value: &Value) -> Option<Position> {
+    Some(Position {
+        line: value.get("line")?.as_u64()?,
+        character: value.get("character")?.as_u64()?,
+    })
+}
+
+/// Parse an LSP `range` into its two positions.
+fn parse_range(range: &Value) -> Option<(Position, Position)> {
+    Some((parse_position(range.get("start")?)?, parse_position(range.get("end")?)?))
 }
 
 impl Client {
     /// An error message with whatever the server said on standard error.
     fn exit_error(&mut self, reason: &str) -> String {
         // The stderr reader sends when the stream closes, which happens as
-        // the process exits; give it a moment.
-        for _ in 0..20 {
-            if let Ok(text) = self.stderr.try_recv() {
-                if let Ok(mut stored) = self.last_stderr.lock() {
-                    *stored = text;
-                }
-                break;
+        // the process exits; wait once rather than polling on a timer.
+        if let Ok(text) = self.stderr.recv_timeout(Duration::from_millis(200)) {
+            if let Ok(mut stored) = self.last_stderr.lock() {
+                *stored = text;
             }
-            std::thread::sleep(Duration::from_millis(10));
         }
         let stderr = self.stderr();
         let first = stderr
@@ -247,7 +264,7 @@ impl Client {
             child: Some(child),
             writer: Some(writer),
             reader: Some(reader),
-            last_stderr: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            last_stderr: std::sync::Mutex::new(String::new()),
             stderr: error_rx,
             dead: false,
         };
@@ -331,10 +348,7 @@ impl Client {
         }
         Some(self.send_request(
             "textDocument/hover",
-            json!({
-                "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
-                "position": { "line": position.line, "character": position.character }
-            }),
+            text_document_position(path, position),
         ))
     }
 
@@ -350,11 +364,11 @@ impl Client {
         }
         Some(self.send_request(
             "textDocument/references",
-            json!({
-                "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
-                "position": { "line": position.line, "character": position.character },
-                "context": { "includeDeclaration": include_declaration }
-            }),
+            {
+                let mut value = text_document_position(path, position);
+                value["context"] = json!({ "includeDeclaration": include_declaration });
+                value
+            },
         ))
     }
 
@@ -365,10 +379,7 @@ impl Client {
         }
         Some(self.send_request(
             "textDocument/completion",
-            json!({
-                "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
-                "position": { "line": position.line, "character": position.character }
-            }),
+            text_document_position(path, position),
         ))
     }
 
@@ -403,11 +414,11 @@ impl Client {
         }
         Some(self.send_request(
             "textDocument/rename",
-            json!({
-                "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
-                "position": { "line": position.line, "character": position.character },
-                "newName": new_name
-            }),
+            {
+                let mut value = text_document_position(path, position);
+                value["newName"] = json!(new_name);
+                value
+            },
         ))
     }
 
@@ -476,10 +487,7 @@ impl Client {
         }
         Some(self.send_request(
             "textDocument/definition",
-            json!({
-                "textDocument": { "uri": path_to_uri(&path.to_string_lossy()) },
-                "position": { "line": position.line, "character": position.character }
-            }),
+            text_document_position(path, position),
         ))
     }
 
@@ -570,19 +578,11 @@ impl Client {
         let diagnostics = raw
             .iter()
             .filter_map(|diagnostic| {
-                let range = diagnostic.get("range")?;
-                let start = range.get("start")?;
-                let end = range.get("end")?;
+                let (start, end) = parse_range(diagnostic.get("range")?)?;
                 Some(Diagnostic {
                     path: path.clone(),
-                    start: Position {
-                        line: start.get("line")?.as_u64()?,
-                        character: start.get("character")?.as_u64()?,
-                    },
-                    end: Position {
-                        line: end.get("line")?.as_u64()?,
-                        character: end.get("character")?.as_u64()?,
-                    },
+                    start,
+                    end,
                     severity: Severity::from_lsp(diagnostic.get("severity")),
                     message: diagnostic
                         .get("message")
@@ -733,13 +733,13 @@ pub fn workspace_edit(result: &Value) -> Vec<(PathBuf, Vec<ServerTextEdit>)> {
 /// The protocol allows a bare array or a `CompletionList` object, and an item
 /// may carry its insertion text in `textEdit` rather than `insertText`.
 pub fn completion_items(result: &Value) -> Vec<CompletionItem> {
-    let items = match result {
-        Value::Array(items) => items.clone(),
+    let items: &[Value] = match result {
+        Value::Array(items) => items,
         Value::Object(map) => map
             .get("items")
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
         _ => return Vec::new(),
     };
 
@@ -820,18 +820,10 @@ pub fn text_edits(result: &Value) -> Vec<ServerTextEdit> {
     items
         .iter()
         .filter_map(|item| {
-            let range = item.get("range")?;
-            let start = range.get("start")?;
-            let end = range.get("end")?;
+            let (start, end) = parse_range(item.get("range")?)?;
             Some(ServerTextEdit {
-                start: Position {
-                    line: start.get("line")?.as_u64()?,
-                    character: start.get("character")?.as_u64()?,
-                },
-                end: Position {
-                    line: end.get("line")?.as_u64()?,
-                    character: end.get("character")?.as_u64()?,
-                },
+                start,
+                end,
                 new_text: item.get("newText")?.as_str()?.to_string(),
             })
         })
@@ -841,18 +833,13 @@ pub fn text_edits(result: &Value) -> Vec<ServerTextEdit> {
 /// The locations a definition response points at.
 pub fn definition_locations(result: &Value) -> Vec<(PathBuf, Position)> {
     let mut out = Vec::new();
-    let items = match result {
-        Value::Array(items) => items.clone(),
-        Value::Null => Vec::new(),
-        other => vec![other.clone()],
-    };
-    for item in items {
+    let mut push = |item: &Value| {
         // `Location` has `uri`/`range`; `LocationLink` has `targetUri` / `targetRange`.
         let (uri, range) = if let Some(uri) = item.get("uri") {
             (uri, item.get("range"))
         } else {
             let Some(uri) = item.get("targetUri") else {
-                continue;
+                return;
             };
             (
                 uri,
@@ -860,17 +847,19 @@ pub fn definition_locations(result: &Value) -> Vec<(PathBuf, Position)> {
                     .or_else(|| item.get("targetRange")),
             )
         };
-        let Some(range) = range else { continue };
-        let Some(start) = range.get("start") else {
-            continue;
+        let Some(range) = range else { return };
+        let Some(start) = range.get("start").and_then(parse_position) else {
+            return;
         };
         out.push((
             PathBuf::from(uri_to_path(uri.as_str().unwrap_or_default())),
-            Position {
-                line: start.get("line").and_then(Value::as_u64).unwrap_or(0),
-                character: start.get("character").and_then(Value::as_u64).unwrap_or(0),
-            },
+            start,
         ));
+    };
+    match result {
+        Value::Array(items) => items.iter().for_each(&mut push),
+        Value::Null => {}
+        other => push(other),
     }
     out
 }

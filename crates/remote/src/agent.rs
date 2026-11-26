@@ -166,38 +166,14 @@ impl Agent {
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry
-                .path()
-                .strip_prefix(&self.root)
-                .unwrap_or(&entry.path())
-                .to_string_lossy()
-                .replace('\\', "/");
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs());
-            entries.push(Entry {
-                name,
-                path,
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_file() {
-                    metadata.len()
-                } else {
-                    0
-                },
-                modified,
-            });
+            let path = entry.path();
+            entries.push(self.entry_from_metadata(&path, &metadata));
             if entries.len() >= 10_000 {
                 break;
             }
         }
-        entries.sort_by(|left, right| {
-            right
-                .is_dir
-                .cmp(&left.is_dir)
-                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        entries.sort_by_cached_key(|entry| {
+            (std::cmp::Reverse(entry.is_dir), entry.name.to_lowercase())
         });
         Ok(json!({ "entries": entries }))
     }
@@ -205,28 +181,29 @@ impl Agent {
     fn stat(&self, params: &Value) -> Result<Value, AgentError> {
         let path = self.existing(Self::param(params, "path")?)?;
         let metadata = fs::metadata(&path).map_err(AgentError::io)?;
-        let name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let relative = path
-            .strip_prefix(&self.root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        Ok(json!({
-            "entry": Entry {
-                name,
-                path: relative,
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_file() { metadata.len() } else { 0 },
-                modified: metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs()),
-            }
-        }))
+        Ok(json!({ "entry": self.entry_from_metadata(&path, &metadata) }))
+    }
+
+    /// One listing entry from a path and its metadata.
+    fn entry_from_metadata(&self, path: &Path, metadata: &fs::Metadata) -> Entry {
+        Entry {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            is_dir: metadata.is_dir(),
+            size: if metadata.is_file() { metadata.len() } else { 0 },
+            modified: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
+        }
     }
 
     fn read(&self, params: &Value) -> Result<Value, AgentError> {
@@ -372,14 +349,14 @@ pub fn main() -> i32 {
                 continue;
             }
         };
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let id = request.get("id").unwrap_or(&Value::Null);
         let method = request
             .get("method")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let params = request.get("params").unwrap_or(&Value::Null);
 
-        let response = match agent.handle(method, &params) {
+        let response = match agent.handle(method, params) {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err(error) => json!({
                 "jsonrpc": "2.0",

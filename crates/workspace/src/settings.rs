@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 /// How many recent entries to keep.
 const MAX_RECENT: usize = 20;
 /// The current settings schema. Version 2 moved the default to a hidden
-/// sidebar; older files get that default once.
-const SCHEMA_VERSION: u32 = 2;
+/// sidebar; version 3 moved the default to a hidden document outline. Older
+/// files get each new default once.
+const SCHEMA_VERSION: u32 = 3;
 
 /// The editor's settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,14 @@ pub struct Settings {
     pub show_sidebar: bool,
     /// Whether the editor is split in two.
     pub split: bool,
+    /// The share of the editor width the left pane takes when split.
+    pub split_ratio: f32,
+    /// The share of a Markdown tab's width the source takes.
+    pub markdown_ratio: f32,
+    /// Whether a Markdown preview or PDF shows its outline.
+    pub show_outline: bool,
+    /// Whether long lines wrap to the editor width.
+    pub soft_wrap: bool,
     /// Whether the gutter shows line numbers.
     pub line_numbers: bool,
     /// The most recently opened files.
@@ -63,6 +72,10 @@ impl Default for Settings {
             sidebar_width: 240.0,
             show_sidebar: false,
             split: false,
+            split_ratio: 0.5,
+            markdown_ratio: 0.5,
+            show_outline: false,
+            soft_wrap: true,
             line_numbers: true,
             recent_files: Vec::new(),
             recent_projects: Vec::new(),
@@ -73,6 +86,23 @@ impl Default for Settings {
             collapsed_directories: HashMap::new(),
         }
     }
+}
+
+/// Apply the one-time default changes for older settings files.
+///
+/// Returns whether anything changed and the file needs writing back.
+fn migrate(settings: &mut Settings) -> bool {
+    let version = settings.schema_version;
+    if version < 2 {
+        // The old default was a visible sidebar; apply the hidden default once.
+        settings.show_sidebar = false;
+    }
+    if version < 3 {
+        // The old default was a visible outline; apply the hidden default once.
+        settings.show_outline = false;
+    }
+    settings.schema_version = SCHEMA_VERSION;
+    version < SCHEMA_VERSION
 }
 
 impl Settings {
@@ -87,12 +117,7 @@ impl Settings {
         };
         match serde_json::from_str::<Settings>(&text) {
             Ok(mut settings) => {
-                // Version 2 hides the sidebar by default. An older file has
-                // the old default stored as `true`, which cannot be told apart
-                // from a deliberate choice, so apply the new default once.
-                if settings.schema_version < SCHEMA_VERSION {
-                    settings.schema_version = SCHEMA_VERSION;
-                    settings.show_sidebar = false;
+                if migrate(&mut settings) {
                     settings.save();
                 }
                 settings
@@ -245,6 +270,28 @@ mod tests {
     }
 
     #[test]
+    fn the_outline_starts_hidden_and_the_splits_are_even() {
+        let settings = Settings::default();
+        assert!(!settings.show_outline);
+        assert_eq!(settings.split_ratio, 0.5);
+        assert_eq!(settings.markdown_ratio, 0.5);
+        assert!(settings.soft_wrap);
+    }
+
+    #[test]
+    fn older_settings_hide_the_outline_once() {
+        let mut settings = Settings {
+            schema_version: 2,
+            show_outline: true,
+            ..Default::default()
+        };
+        assert!(migrate(&mut settings));
+        assert_eq!(settings.schema_version, 3);
+        assert!(!settings.show_outline);
+        assert!(!migrate(&mut settings), "a current file is left alone");
+    }
+
+    #[test]
     fn collapsed_directories_survive_the_round_trip() {
         let mut settings = Settings::default();
         settings.collapsed_directories.insert(
@@ -284,5 +331,12 @@ mod tests {
         let parsed: Settings = serde_json::from_str(r#"{"dark": false}"#).unwrap();
         assert!(!parsed.dark);
         assert_eq!(parsed.font_size, Settings::default().font_size);
+        assert_eq!(parsed.split_ratio, Settings::default().split_ratio);
+        assert_eq!(
+            parsed.markdown_ratio,
+            Settings::default().markdown_ratio
+        );
+        assert_eq!(parsed.show_outline, Settings::default().show_outline);
+        assert_eq!(parsed.soft_wrap, Settings::default().soft_wrap);
     }
 }

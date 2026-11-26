@@ -90,6 +90,10 @@ pub enum Command {
     ToggleTheme,
     /// Split the editor in two, or close the split.
     ToggleSplit,
+    /// Show or hide the outline in a Markdown preview or PDF.
+    ToggleOutline,
+    /// Wrap long lines to the editor width, or scroll them horizontally.
+    ToggleSoftWrap,
     /// Show or hide the sidebar.
     ToggleSidebar,
     /// Create a new, empty document.
@@ -319,7 +323,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         command: Command::ShowLatexPdf,
-        label: "LaTeX: open PDF beside source",
+        label: "LaTeX: preview PDF beside source",
         group: "LaTeX",
         shortcut: None,
     },
@@ -382,6 +386,18 @@ pub const COMMANDS: &[CommandSpec] = &[
         label: "Toggle split editor",
         group: "View",
         shortcut: Some("Ctrl+\\"),
+    },
+    CommandSpec {
+        command: Command::ToggleOutline,
+        label: "Toggle document outline",
+        group: "View",
+        shortcut: Some("Ctrl+Shift+O"),
+    },
+    CommandSpec {
+        command: Command::ToggleSoftWrap,
+        label: "Toggle soft wrap",
+        group: "View",
+        shortcut: None,
     },
     CommandSpec {
         command: Command::ToggleSidebar,
@@ -695,6 +711,8 @@ pub fn run(command: Command, workspace: &mut Workspace) {
         }
         Command::ToggleTheme => workspace.toggle_theme(),
         Command::ToggleSplit => workspace.toggle_split(),
+        Command::ToggleOutline => workspace.toggle_outline(),
+        Command::ToggleSoftWrap => workspace.toggle_soft_wrap(),
         Command::ToggleSidebar => workspace.toggle_sidebar(),
         Command::NewFile => workspace.begin_new_file(),
         Command::RenameFile => workspace.begin_rename(),

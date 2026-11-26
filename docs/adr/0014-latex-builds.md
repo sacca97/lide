@@ -74,8 +74,9 @@ An error with no line number still counts, at line 0.
   lists. The build directory is a setting (`latex_output_directory`, passed
   as `-output-directory DIR`), but recipe lists and continuous builds are not
   implemented; the roadmap records them.
-* SyncTeX is written and read in both directions: forward from the source
-  line, inverse from a point on the page.
+* SyncTeX is written by `texres` and read in both directions directly from
+  `.synctex.gz`: forward from the source line, inverse from a point on the
+  page. The `synctex` command line tool is not required.
 * Verified against `texres` on this machine: a minimal document produces
   `main.pdf` and `main.synctex.gz`, and a missing input produces a navigable
   `--> file:line:column` error.

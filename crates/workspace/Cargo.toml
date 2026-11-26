@@ -13,8 +13,8 @@ rune-kit.workspace = true
 rune-edit.workspace = true
 rune-image.workspace = true
 log.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 notify = "9"
 lide-text = { path = "../text" }
 lide-editor = { path = "../editor" }
@@ -30,5 +30,3 @@ lide-latex = { path = "../latex" }
 lide-terminal = { path = "../terminal" }
 lide-platform = { path = "../platform" }
 
-[dev-dependencies]
-rune-edit.workspace = true

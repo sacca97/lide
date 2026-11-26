@@ -51,9 +51,24 @@ struct RenderResult {
     height: u32,
     /// The RGBA pixels.
     rgba: Option<Vec<u8>>,
-    /// The page's text, with every character's box in PDF points.
-    text: Vec<crate::render::TextChar>,
+    /// The page's text, with every character's box in PDF points. `None` when
+    /// the worker knows the page's text has not changed.
+    text: Option<Vec<crate::render::TextChar>>,
     error: Option<String>,
+}
+
+impl RenderResult {
+    fn err(page: u32, scale: f32, error: String) -> Self {
+        Self {
+            page,
+            scale,
+            width: 0,
+            height: 0,
+            rgba: None,
+            text: None,
+            error: Some(error),
+        }
+    }
 }
 
 /// A rendered page kept for the next time it is shown.
@@ -61,7 +76,10 @@ struct CachedPage {
     page: u32,
     /// The scale the bitmap was rendered at.
     scale: f32,
-    bitmap: PageBitmap,
+    /// The uploaded texture. Cloning it is cheap; the pixels are shared.
+    image: Image,
+    /// The RGBA bytes the texture holds, for cache accounting.
+    byte_len: usize,
 }
 
 /// A PDF that is open in the workspace.
@@ -71,6 +89,9 @@ pub struct PdfView {
     page: u32,
     /// The zoom factor the page is drawn at.
     scale: f32,
+    /// Whether the page is fitted to the pane's width. A zoom by hand turns
+    /// it off.
+    fit: bool,
     /// The scale of the bitmap currently drawn. Until a new render arrives, the
     /// old bitmap is stretched to the new zoom, so pinch and the zoom buttons
     /// move at once rather than waiting for the renderer.
@@ -105,6 +126,13 @@ pub struct PdfView {
     pending: Option<(f32, PageBitmap)>,
     /// The text of each page that has been rendered, by page number.
     texts: std::collections::HashMap<u32, Vec<crate::render::TextChar>>,
+    /// A place a source line asked for: phrases to look for on the page, and
+    /// the SyncTeX height (from the top) to be nearest to. It waits for the
+    /// page's text when that has not arrived yet.
+    sync_goal: Option<(Vec<String>, f32)>,
+    /// A scroll offset, in pixels, that the goal found for the workspace to
+    /// apply.
+    scroll_wanted: Option<f32>,
     /// The text being searched for.
     pub search: TextEdit,
     /// The boxes of the matches on the current page, in PDF points.
@@ -153,6 +181,7 @@ impl PdfView {
             path,
             page: 0,
             scale: 1.0,
+            fit: true,
             image_scale: 1.0,
             image: None,
             requests: Some(request_tx),
@@ -167,6 +196,8 @@ impl PdfView {
             scroll_target: Rc::new(Cell::new(0.0)),
             pending: None,
             texts: std::collections::HashMap::new(),
+            sync_goal: None,
+            scroll_wanted: None,
             search: TextEdit::new(""),
             matches: Vec::new(),
             selected: 0,
@@ -206,6 +237,95 @@ impl PdfView {
         self.document.page_count()
     }
 
+    /// The height of a page in PDF points.
+    pub fn page_height(&self, page: u32) -> Option<f32> {
+        self.document.page(page).ok().map(|info| info.height)
+    }
+
+    /// Look for the first of `phrases` on the current page, nearest to `y`
+    /// points from the top, and select it. The page's text may not be loaded
+    /// yet; the goal then waits for it.
+    pub fn set_sync_goal(&mut self, phrases: Vec<String>, y: f32) {
+        self.sync_goal = Some((phrases, y));
+        self.scroll_wanted = None;
+        self.resolve_sync_goal();
+    }
+
+    /// The scroll offset a resolved goal wants, once.
+    pub fn take_scroll_wanted(&mut self) -> Option<f32> {
+        self.scroll_wanted.take()
+    }
+
+    fn resolve_sync_goal(&mut self) -> bool {
+        let Some((phrases, y)) = self.sync_goal.clone() else {
+            return false;
+        };
+        let Some(chars) = self.texts.get(&self.page) else {
+            return false;
+        };
+        let height = self.page_height(self.page).unwrap_or(792.0);
+        self.sync_goal = None;
+        let found = phrases
+            .iter()
+            .find_map(|phrase| find_phrase(chars, phrase, height - y));
+        if let Some((start, end)) = found {
+            let run = run_box(&chars[start..end]);
+            // run_box is (left, bottom, width, height) in PDF points.
+            let top_y = height - (run.1 + run.3);
+            self.selection = Some((start, end));
+            self.pointer = Some((run.0, run.1));
+            self.scroll_wanted = Some(self.scroll_to_height(top_y));
+        } else {
+            self.scroll_wanted = Some(self.scroll_to_height(y));
+        }
+        true
+    }
+
+    /// The words around a point on the current page, for finding the source
+    /// of what was clicked: the one before, the clicked one and the one after,
+    /// each folded to lowercase letters and digits.
+    pub fn words_around(&self, x: f32, y: f32) -> Option<(String, String, String)> {
+        let chars = self.texts.get(&self.page)?;
+        let at = char_at(chars, x, y)?;
+        Some(words_around_index(chars, at))
+    }
+
+    /// Make `y` points from the top of the page the scroll target, a little
+    /// below the viewport's top edge, and return the offset in pixels.
+    pub fn scroll_to_height(&self, y: f32) -> f32 {
+        let offset = (y * self.scale - 160.0).max(0.0);
+        self.scroll_target.set(offset);
+        offset
+    }
+
+    /// Fit the page to a pane `width` points wide, never larger than life.
+    ///
+    /// A page wider than its pane is centred and clipped on both sides, which
+    /// hides its left edge and swallows the clicks there. Does nothing once the
+    /// zoom has been set by hand.
+    pub fn fit_to_width(&mut self, width: f32) {
+        if !self.fit || width < 50.0 {
+            return;
+        }
+        let Some(page_width) = self
+            .document
+            .page(self.page)
+            .ok()
+            .map(|info| info.width)
+            .filter(|w| *w > 1.0)
+        else {
+            return;
+        };
+        // Leave room for the scroll bar and a margin.
+        let scale = ((width - 24.0) / page_width).clamp(MIN_SCALE, 1.0);
+        self.set_scale(scale);
+    }
+
+    /// Whether the text of the current page has been read.
+    pub fn has_text_for_page(&self) -> bool {
+        self.texts.contains_key(&self.page)
+    }
+
     /// The zoom factor.
     pub fn scale(&self) -> f32 {
         self.scale
@@ -232,21 +352,25 @@ impl PdfView {
 
     /// Zoom in one step.
     pub fn zoom_in(&mut self) {
+        self.fit = false;
         self.set_scale(self.scale * ZOOM_STEP);
     }
 
     /// Zoom out one step.
     pub fn zoom_out(&mut self) {
+        self.fit = false;
         self.set_scale(self.scale / ZOOM_STEP);
     }
 
     /// Return to actual size.
     pub fn reset_zoom(&mut self) {
+        self.fit = false;
         self.set_scale(1.0);
     }
 
     /// Zoom by a factor, for a pinch or a Ctrl+wheel.
     pub fn zoom_by(&mut self, factor: f32) {
+        self.fit = false;
         if factor.is_finite() && factor > 0.0 {
             self.set_scale(self.scale * factor);
         }
@@ -269,30 +393,30 @@ impl PdfView {
     /// changed and the view should be redrawn.
     pub fn poll(&mut self, cache: &ImageCache) -> bool {
         let mut changed = false;
-        if let Some((scale, bitmap)) = self.pending.take() {
-            self.rendered.push(CachedPage {
-                page: self.page,
-                scale,
-                bitmap,
-            });
+        if let Some((scale, (width, height, rgba))) = self.pending.take() {
+            self.cache_page(self.page, scale, width, height, rgba, cache);
             changed = true;
         }
         while let Ok(result) = self.inbox.try_recv() {
             changed = true;
             match (result.rgba, result.error) {
                 (Some(rgba), _) => {
-                    self.texts.insert(result.page, result.text);
+                    if let Some(text) = result.text {
+                        self.texts.insert(result.page, text);
+                    }
                     // One scale per page is enough: a zoom step that was
                     // overtaken while the renderer worked need not stay.
                     self.rendered.retain(|cached| {
                         cached.page != result.page || cached.scale == result.scale
                     });
-                    self.rendered.push(CachedPage {
-                        page: result.page,
-                        scale: result.scale,
-                        bitmap: (result.width, result.height, rgba),
-                    });
-                    self.trim_cache();
+                    self.cache_page(
+                        result.page,
+                        result.scale,
+                        result.width,
+                        result.height,
+                        rgba,
+                        cache,
+                    );
                 }
                 (None, Some(error)) => self.error = Some(error),
                 (None, None) => {}
@@ -303,6 +427,7 @@ impl PdfView {
             let query = self.search.text.clone();
             self.search_for(&query);
         }
+        changed |= self.resolve_sync_goal();
 
         // A request may have been dropped while the renderer was busy with
         // the previous scale. Ask again for whatever is on screen now.
@@ -316,9 +441,8 @@ impl PdfView {
                 .iter()
                 .find(|cached| cached.page == self.page && cached.scale == self.scale)
             {
-                let (width, height, rgba) = cached.bitmap.clone();
-                let scale = cached.scale;
-                self.load_page(width, height, rgba, scale, cache);
+                self.image = Some(cached.image.clone());
+                self.image_scale = cached.scale;
                 self.shown = Some((self.page, self.scale));
                 changed = true;
             }
@@ -327,13 +451,31 @@ impl PdfView {
         changed
     }
 
+    /// Upload a rendered bitmap and keep its shared handle in the cache.
+    fn cache_page(
+        &mut self,
+        page: u32,
+        scale: f32,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        cache: &ImageCache,
+    ) {
+        let byte_len = width as usize * height as usize * 4;
+        let image = cache.rgba(width, height, rgba);
+        let _ = image.wait();
+        self.rendered.push(CachedPage {
+            page,
+            scale,
+            image,
+            byte_len,
+        });
+        self.trim_cache();
+    }
+
     /// Drop the oldest cached pages once the cache is large.
     fn trim_cache(&mut self) {
-        let mut bytes: usize = self
-            .rendered
-            .iter()
-            .map(|cached| cached.bitmap.2.len())
-            .sum();
+        let mut bytes: usize = self.rendered.iter().map(|cached| cached.byte_len).sum();
         while (self.rendered.len() > CACHED_PAGES || bytes > CACHE_BYTES) && self.rendered.len() > 1
         {
             let index = self
@@ -341,7 +483,7 @@ impl PdfView {
                 .iter()
                 .position(|cached| cached.page != self.page)
                 .unwrap_or(0);
-            bytes = bytes.saturating_sub(self.rendered[index].bitmap.2.len());
+            bytes = bytes.saturating_sub(self.rendered[index].byte_len);
             self.rendered.remove(index);
         }
     }
@@ -401,25 +543,6 @@ impl PdfView {
         {
             self.requested = Some(target);
         }
-    }
-
-    /// Hand a rendered page to the image cache.
-    ///
-    /// The wait makes the page appear in the same frame it was decoded,
-    /// rather than a frame later. The bitmap has already been rendered by
-    /// this point, so only the conversion to texture data is waited for.
-    fn load_page(
-        &mut self,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-        scale: f32,
-        cache: &ImageCache,
-    ) {
-        let image = cache.rgba(width, height, rgba);
-        let _ = image.wait();
-        self.image = Some(image);
-        self.image_scale = scale;
     }
 
     /// Find `query` on the pages that have been rendered.
@@ -531,12 +654,6 @@ impl PdfView {
             // newline characters in it.
             if (character.bottom - previous_bottom).abs() > character.height().max(1.0) {
                 text.push('\n');
-            } else if let Some(last) = text.chars().last() {
-                // A visible gap between glyphs is a space the layer did not emit.
-                if let Some(previous) = chars.get(start) {
-                    let _ = previous;
-                }
-                let _ = last;
             }
             previous_bottom = character.bottom;
             text.push(character.ch);
@@ -565,6 +682,8 @@ impl PdfView {
         &self,
         k: &Kit,
         pane: usize,
+        show_outline: bool,
+        on_press: impl Fn(&mut S, f32, f32) + Clone + 'static,
         lens: impl Fn(&mut S) -> &mut PdfView + Clone + 'static,
     ) -> El {
         let scroll_key = format!("pdf-scroll-{pane}");
@@ -775,6 +894,8 @@ impl PdfView {
             }
 
             let drag_lens = lens.clone();
+            let press_lens = on_press.clone();
+            let hover_lens = lens.clone();
             let magnify_lens = lens.clone();
             let double_lens = lens.clone();
             let page = el()
@@ -783,19 +904,43 @@ impl PdfView {
                 .h(page_height)
                 .pixels(image.pixels())
                 .child(highlights)
+                // Keep the last position over the page, so a double click can
+                // ask for its source even when the pointer never moved.
+                .on_pointer_move_local(move |s: &mut S, event, _tx: &mut rune::Tx| {
+                    let view = hover_lens(s);
+                    let scale = view.scale().max(0.01);
+                    let height = view.page_height(view.page()).unwrap_or(792.0);
+                    view.pointer = Some((
+                        event.x / scale,
+                        (height - event.y / scale).max(0.0),
+                    ));
+                })
                 // Dragging on the page selects text. The handler gets the
                 // pointer in the element's own points, measured from its top
                 // left, so the y is flipped to reach PDF's bottom-left origin.
                 .on_drag(move |s: &mut S, drag: &mut rune::Drag, tx: &mut rune::Tx| {
-                    let view = drag_lens(s);
-                    let page_height = drag.h;
-                    let start = (drag.start_x, page_height - drag.start_y);
-                    let end = (drag.x, page_height - drag.y);
-                    view.pointer = Some(end);
-                    view.select(start, end);
+                    let end = {
+                        let view = drag_lens(s);
+                        let scale = view.scale().max(0.01);
+                        let page_height = view.page_height(view.page()).unwrap_or(792.0);
+                        let start = (
+                            drag.start_x / scale,
+                            page_height - drag.start_y / scale,
+                        );
+                        let end = (drag.x / scale, page_height - drag.y / scale);
+                        view.pointer = Some(end);
+                        view.select(start, end);
+                        end
+                    };
+
+                    // The press is reported in PDF points, so the workspace
+                    // can tell a double click from two clicks of its own.
+                    if drag.phase == rune::Phase::Down {
+                        press_lens(s, end.0, end.1);
+                    }
 
                     if drag.phase == rune::Phase::Up {
-                        let text = view.selected_text();
+                        let text = drag_lens(s).selected_text();
                         if !text.trim().is_empty() {
                             tx.copy(text);
                         }
@@ -895,7 +1040,7 @@ impl PdfView {
                 true
             },
         );
-        if self.outline.is_empty() {
+        if !show_outline || self.outline.is_empty() {
             document = document.child(body);
         } else {
             document = document.child(
@@ -910,6 +1055,101 @@ impl PdfView {
         }
         document
     }
+}
+
+/// Lowercase letters and digits only, with ligatures spelled out: what a PDF's
+/// text and a LaTeX source agree on.
+pub fn fold_text(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        push_folded(&mut out, c);
+    }
+    out
+}
+
+fn push_folded(out: &mut String, c: char) {
+    match c {
+        '\u{FB00}' => out.push_str("ff"),
+        '\u{FB01}' => out.push_str("fi"),
+        '\u{FB02}' => out.push_str("fl"),
+        '\u{FB03}' => out.push_str("ffi"),
+        '\u{FB04}' => out.push_str("ffl"),
+        c if c.is_alphanumeric() => out.extend(c.to_lowercase()),
+        _ => {}
+    }
+}
+
+/// The occurrence of `phrase` whose middle is nearest to `y` (from the page's
+/// bottom), as a range of character indexes.
+pub fn find_phrase(chars: &[TextChar], phrase: &str, y: f32) -> Option<(usize, usize)> {
+    let needle: Vec<char> = fold_text(phrase).chars().collect();
+    if needle.is_empty() {
+        return None;
+    }
+    let mut hay: Vec<char> = Vec::new();
+    let mut owner: Vec<usize> = Vec::new();
+    for (index, c) in chars.iter().enumerate() {
+        let mut folded = String::new();
+        push_folded(&mut folded, c.ch);
+        for f in folded.chars() {
+            hay.push(f);
+            owner.push(index);
+        }
+    }
+    if hay.len() < needle.len() {
+        return None;
+    }
+    let mut best: Option<(usize, usize, f32)> = None;
+    for start in 0..=hay.len() - needle.len() {
+        if hay[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let first = owner[start];
+        let last = owner[start + needle.len() - 1];
+        let (a, b) = (&chars[first], &chars[last]);
+        let middle = (a.bottom + a.top) / 2.0;
+        let distance = (middle - y).abs();
+        // A phrase that wraps onto the next line is not a match for one line.
+        if (a.bottom - b.bottom).abs() > (a.top - a.bottom).max(4.0) * 2.0 {
+            continue;
+        }
+        if best.is_none_or(|(_, _, d)| distance < d) {
+            best = Some((first, last + 1, distance));
+        }
+    }
+    best.map(|(a, b, _)| (a, b))
+}
+
+/// Split the text into words by spaces, gaps and line changes, and fold the
+/// word at `at` and its neighbours.
+pub fn words_around_index(chars: &[TextChar], at: usize) -> (String, String, String) {
+    let mut words: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    for index in 1..=chars.len() {
+        let breaks = index == chars.len() || {
+            let (a, b) = (&chars[index - 1], &chars[index]);
+            let size = (a.top - a.bottom).max(1.0);
+            a.ch.is_whitespace()
+                || b.ch.is_whitespace()
+                || (a.bottom - b.bottom).abs() > size * 0.5
+                || b.left - a.right > size * 0.3
+        };
+        if breaks {
+            words.push((start, index));
+            start = index;
+        }
+    }
+    let folded = |range: Option<&(usize, usize)>| -> String {
+        range
+            .map(|(a, b)| fold_text(&chars[*a..*b].iter().map(|c| c.ch).collect::<String>()))
+            .unwrap_or_default()
+    };
+    let position = words.iter().position(|(a, b)| at >= *a && at < *b).unwrap_or(0);
+    (
+        folded(position.checked_sub(1).and_then(|i| words.get(i))),
+        folded(words.get(position)),
+        folded(words.get(position + 1)),
+    )
 }
 
 /// The index of the character nearest a point on the page.
@@ -970,10 +1210,14 @@ pub fn selection_boxes(
 }
 
 fn run_box(chars: &[TextChar]) -> (f32, f32, f32, f32) {
-    let left = chars.iter().map(|c| c.left).fold(f32::MAX, f32::min);
-    let right = chars.iter().map(|c| c.right).fold(f32::MIN, f32::max);
-    let bottom = chars.iter().map(|c| c.bottom).fold(f32::MAX, f32::min);
-    let top = chars.iter().map(|c| c.top).fold(f32::MIN, f32::max);
+    let (mut left, mut right) = (f32::MAX, f32::MIN);
+    let (mut bottom, mut top) = (f32::MAX, f32::MIN);
+    for character in chars {
+        left = left.min(character.left);
+        right = right.max(character.right);
+        bottom = bottom.min(character.bottom);
+        top = top.max(character.top);
+    }
     (left, bottom, right - left, top - bottom)
 }
 
@@ -997,12 +1241,7 @@ pub fn find_matches(chars: &[crate::render::TextChar], query: &str) -> Vec<(f32,
         if haystack[start..start + needle.len()] != needle[..] {
             continue;
         }
-        let window = &chars[start..start + needle.len()];
-        let left = window.iter().map(|c| c.left).fold(f32::MAX, f32::min);
-        let right = window.iter().map(|c| c.right).fold(f32::MIN, f32::max);
-        let bottom = window.iter().map(|c| c.bottom).fold(f32::MAX, f32::min);
-        let top = window.iter().map(|c| c.top).fold(f32::MIN, f32::max);
-        matches.push((left, bottom, right - left, top - bottom));
+        matches.push(run_box(&chars[start..start + needle.len()]));
     }
     matches
 }
@@ -1015,20 +1254,18 @@ fn render_worker(
 ) {
     let engine = PdfiumEngine::load();
     let mut document = None;
+    let mut texts: std::collections::HashMap<u32, Vec<crate::render::TextChar>> =
+        std::collections::HashMap::new();
 
     while let Ok(request) = requests.recv() {
         let engine = match &engine {
             Ok(engine) => engine,
             Err(error) => {
-                let _ = results.send(RenderResult {
-                    page: request.page,
-                    scale: request.scale,
-                    width: 0,
-                    height: 0,
-                    rgba: None,
-                    text: Vec::new(),
-                    error: Some(error.to_string()),
-                });
+                let _ = results.send(RenderResult::err(
+                    request.page,
+                    request.scale,
+                    error.to_string(),
+                ));
                 continue;
             }
         };
@@ -1037,49 +1274,43 @@ fn render_worker(
             match engine.open(&path) {
                 Ok(opened) => document = Some(opened),
                 Err(error) => {
-                    let _ = results.send(RenderResult {
-                        page: request.page,
-                        scale: request.scale,
-                        width: 0,
-                        height: 0,
-                        rgba: None,
-                        text: Vec::new(),
-                        error: Some(error.to_string()),
-                    });
+                    let _ = results.send(RenderResult::err(
+                        request.page,
+                        request.scale,
+                        error.to_string(),
+                    ));
                     continue;
                 }
             }
         }
 
-        let rendered = document
-            .as_ref()
-            .expect("the document was just opened")
-            .render_page(request.page, request.scale);
+        let document = document.as_ref().expect("the document was just opened");
+        let rendered = document.render_page(request.page, request.scale);
 
         let result = match rendered {
-            Ok(page) => RenderResult {
-                page: request.page,
-                scale: request.scale,
-                width: page.width,
-                height: page.height,
-                rgba: Some(page.rgba),
-                text: document
-                    .as_ref()
-                    .expect("the document was just opened")
-                    .page_text(request.page)
-                    .map(|text| text.chars)
-                    .unwrap_or_default(),
-                error: None,
-            },
-            Err(error) => RenderResult {
-                page: request.page,
-                scale: request.scale,
-                width: 0,
-                height: 0,
-                rgba: None,
-                text: Vec::new(),
-                error: Some(error.to_string()),
-            },
+            Ok(page) => {
+                let text = match texts.entry(request.page) {
+                    std::collections::hash_map::Entry::Occupied(_) => None,
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        let chars = document
+                            .page_text(request.page)
+                            .map(|text| text.chars)
+                            .unwrap_or_default();
+                        slot.insert(chars.clone());
+                        Some(chars)
+                    }
+                };
+                RenderResult {
+                    page: request.page,
+                    scale: request.scale,
+                    width: page.width,
+                    height: page.height,
+                    rgba: Some(page.rgba),
+                    text,
+                    error: None,
+                }
+            }
+            Err(error) => RenderResult::err(request.page, request.scale, error.to_string()),
         };
         let _ = results.send(result);
     }

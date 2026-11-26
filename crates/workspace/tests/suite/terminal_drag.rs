@@ -6,14 +6,7 @@ use lide_workspace::{Document, Workspace};
 use rune::{Env, PointerButton, Runtime};
 
 fn isolate_settings() {
-    use std::sync::OnceLock;
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let directory = std::env::temp_dir().join("lide-test-config-terminal-drag");
-        let _ = std::fs::create_dir_all(&directory);
-        // SAFETY: this runs once, before any test touches the settings.
-        unsafe { std::env::set_var("LIDE_CONFIG_DIR", &directory) };
-    });
+    crate::isolate_settings();
 }
 
 fn screen(workspace: &Workspace) -> String {

@@ -10,6 +10,5 @@ description = "The source code editor: a document backed by a text field."
 [dependencies]
 rune-edit.workspace = true
 lide-resource = { path = "../resource" }
-log.workspace = true
 thiserror.workspace = true
 lide-text = { path = "../text" }

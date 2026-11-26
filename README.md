@@ -27,7 +27,9 @@ LaTeX and PDF support.
   sidebar can be resized by dragging its edge and collapsed with `Ctrl+B` or the
   rail's chevron. Folders start collapsed, and how far each workspace was opened
   is remembered.
-- Line numbers, syntax highlighting for 80 languages, undo and redo.
+- Soft-wrapped text by default, scaling with the editor pane; syntax
+  highlighting for 80 languages, undo and redo. Line numbers return when soft
+  wrap is off.
 - Find and replace in the file, with smart case and replace-all.
 - A command palette: every action is in it, `Ctrl+Shift+P`, together with the
   project's tasks and recently opened files and folders.
@@ -65,7 +67,7 @@ LaTeX and PDF support.
 
 - Markdown with a live preview: tables, task lists, links, fenced code, math and
   Mermaid diagrams, a navigable heading outline, and source and preview that
-  scroll together.
+  scroll together. The source/preview divider is draggable.
 - PDFs: previous/next page controls, zoom buttons with `Ctrl+=`, `Ctrl+-` and
   `Ctrl+0`, pinch and Ctrl+wheel zoom, smooth wheel scrolling that turns the
   page at the end of the page, text search with the matches highlighted at their
@@ -83,14 +85,16 @@ LaTeX and PDF support.
 - `texres` is the builder (`texres file.tex`), with the output streaming into
   a panel and every error clickable.
 - A successful build opens the PDF **beside the source**, leaving the `.tex`
-  in the other pane; "LaTeX: open PDF beside source" does the same from the
-  palette when the PDF already exists.
+  in the other pane. The tab strip's **Preview** button opens an existing PDF
+  the same way without building it.
 - The engine is chosen from the palette (`auto`, `pdflatex`, `xelatex`, or
   `lualatex`), and the choice is remembered. Builds can write into a separate
-  output directory, logs and SyncTeX file included. Saving a `.tex` file
-  rebuilds it; nothing rebuilds on a timer.
-- Double-click a point on the PDF to jump back to the source; the status bar's
-  **PDF** / **Source** chip or `Ctrl+Shift+J` jumps the other way.
+  output directory, logs and SyncTeX file included. Saving a changed `.tex`
+  file rebuilds it; saving an unchanged file does nothing, and nothing rebuilds
+  on a timer.
+- Double-click a point on the PDF to jump back to the source, and
+  `Cmd`/`Ctrl`-click a source line to jump to its place in the PDF. The status
+  bar's **PDF** / **Source** chip or `Ctrl+Shift+J` does the same.
 
 ## Building
 
@@ -100,7 +104,7 @@ See [`docs/build.md`](docs/build.md). The short version:
 sudo dnf install -y vulkan-loader mesa-vulkan-drivers \
     wayland-devel libxkbcommon-devel libxkbcommon-x11 fontconfig-devel
 
-./scripts/fetch-pdfium.sh     # PDF rendering (runtime only)
+./scripts/fetch-pdfium.sh     # PDF rendering (embedded when present)
 cargo build --release
 ```
 
@@ -126,6 +130,7 @@ interrupt: `Ctrl+C` still goes to the shell, and the terminal's clipboard is
 | `Ctrl+Shift+F` | Search the workspace |
 | `Ctrl+B` | Toggle the sidebar |
 | `Ctrl+\` | Toggle the split |
+| `Ctrl+Shift+O` | Toggle the Markdown/PDF outline |
 | `F12` / `Shift+F12` | Go to definition / find references |
 | `Ctrl+K` / `Ctrl+Shift+I` | Hover / format document |
 | `Ctrl+G` | Diff the current file |

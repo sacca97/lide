@@ -4,19 +4,12 @@
 //! look at the state afterwards. No window, no display, no user.
 
 use lide_workspace::Workspace;
-use rune::edit::{Key, KeyEvent, Mods};
+use rune::edit::{Key, KeyEvent, Modifier, Mods};
 use rune::{Env, Runtime};
 
 /// Keep the tests from reading or writing the real settings file.
 fn isolate_settings() {
-    use std::sync::OnceLock;
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let directory = std::env::temp_dir().join("lide-test-config-keys");
-        let _ = std::fs::create_dir_all(&directory);
-        // SAFETY: this runs once, before any test touches the settings.
-        unsafe { std::env::set_var("LIDE_CONFIG_DIR", &directory) };
-    });
+    crate::isolate_settings();
 }
 
 fn runtime() -> Runtime<Workspace> {
@@ -141,6 +134,49 @@ fn typing_filters_the_palette() {
     assert!(!labels
         .iter()
         .any(|label| label == "Toggle light / dark theme"));
+}
+
+#[test]
+fn modifier_keys_track_the_primary_click_state() {
+    let mut rt = runtime();
+    rt.set_modifier_keys(true);
+    press(
+        &mut rt,
+        KeyEvent {
+            key: Key::Modifier {
+                modifier: Modifier::ControlLeft,
+                pressed: true,
+            },
+            mods: Mods {
+                cmd: true,
+                ctrl: true,
+                ..Mods::default()
+            },
+        },
+    );
+    assert!(rt.state.primary_modifier, "Ctrl is held");
+
+    press(
+        &mut rt,
+        KeyEvent {
+            key: Key::Modifier {
+                modifier: Modifier::ControlLeft,
+                pressed: false,
+            },
+            mods: Mods::default(),
+        },
+    );
+    assert!(!rt.state.primary_modifier, "Ctrl was released");
+}
+
+#[test]
+fn ctrl_shift_o_toggles_the_outline() {
+    let mut rt = runtime();
+    rt.state.settings.show_outline = false;
+    press(&mut rt, chord('o', true));
+    assert!(rt.state.settings.show_outline, "the outline opens");
+    press(&mut rt, chord('o', true));
+    assert!(!rt.state.settings.show_outline, "the outline closes again");
 }
 
 #[test]

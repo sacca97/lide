@@ -18,6 +18,14 @@ use crate::{DialogState, Workspace};
 ///
 /// Returns `true` when the key was consumed.
 pub fn handle(workspace: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool {
+    // Modifier keys are only delivered because the app opts in. Remember the
+    // primary one so a source click can tell Cmd/Ctrl-click from a plain one.
+    if matches!(&event.key, Key::Modifier { .. }) {
+        workspace.primary_modifier = event.mods.primary() || event.mods.ctrl;
+        return false;
+    }
+    workspace.last_key_at = workspace.now;
+
     // Escape closes whatever is open, innermost first.
     if event.key == Key::Escape {
         if workspace.terminal_find.open {
@@ -337,6 +345,9 @@ fn shortcut(event: &KeyEvent) -> Option<Command> {
     }
     if event.is_command('n') {
         return Some(Command::NewFile);
+    }
+    if event.is_command('o') && event.mods.shift {
+        return Some(Command::ToggleOutline);
     }
     if event.is_command('b') {
         return Some(Command::ToggleSidebar);

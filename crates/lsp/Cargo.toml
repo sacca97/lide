@@ -8,6 +8,5 @@ repository.workspace = true
 description = "A Language Server Protocol client."
 
 [dependencies]
-serde_json = "1"
+serde_json.workspace = true
 lide-rpc = { path = "../rpc" }
-thiserror.workspace = true

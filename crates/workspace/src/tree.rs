@@ -81,28 +81,27 @@ fn scan_directory(directory: &Path, remaining_depth: usize) -> Vec<TreeNode> {
     };
 
     let mut nodes: Vec<TreeNode> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
-            let path = entry.path();
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            let path = entry.path();
             let is_dir = path.is_dir();
-            let hidden = name.starts_with('.');
             let ignored = is_dir && IGNORED_DIRECTORIES.contains(&name.as_str());
-
-            let children = if is_dir && !hidden && !ignored {
+            let children = if is_dir && !ignored {
                 scan_directory(&path, remaining_depth - 1)
             } else {
                 Vec::new()
             };
-
-            TreeNode {
+            Some(TreeNode {
                 name,
                 path,
                 is_dir,
                 children,
-            }
+            })
         })
-        .filter(|node| !node.name.starts_with('.'))
         .collect();
 
     // Directories first, then files, each alphabetically.

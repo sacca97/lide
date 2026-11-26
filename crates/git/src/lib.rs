@@ -239,8 +239,9 @@ fn run(directory: &Path, args: &[&str]) -> Result<String, GitError> {
 /// is what makes a path with a space or a newline in it survive.
 pub fn parse_status(output: &str) -> Status {
     let mut status = Status::default();
+    let mut records = output.split('\0');
 
-    for record in output.split('\0') {
+    while let Some(record) = records.next() {
         if record.is_empty() {
             continue;
         }
@@ -248,26 +249,25 @@ pub fn parse_status(output: &str) -> Status {
             status.branch = parse_branch(header);
             continue;
         }
-        // A rename record is followed by the original path in the next
-        // record, which is a bare path with no status prefix; it is skipped
-        // because the entry is already complete.
         let mut chars = record.chars();
         let (Some(index), Some(worktree)) = (chars.next(), chars.next()) else {
             continue;
         };
-        let path: String = chars.as_str().to_string();
-        if index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C' {
-            // "new\0old" — the old path arrives as its own record; drop it.
-        }
-        let path = path.trim_start();
+        let path = chars.as_str().trim_start().to_string();
         if path.is_empty() {
             continue;
         }
+        let renamed = index == 'R' || index == 'C' || worktree == 'R' || worktree == 'C';
         status.entries.push(Entry {
             path: PathBuf::from(path),
             index: Change::from_code(index),
             worktree: Change::from_code(worktree),
         });
+        if renamed {
+            // "new\0old": the original path is the next record and is not a
+            // second change.
+            records.next();
+        }
     }
 
     status
@@ -354,6 +354,15 @@ mod tests {
     fn a_deleted_file_is_parsed() {
         let status = parse_status("## main\0 D gone.txt\0");
         assert_eq!(status.entries[0].worktree, Change::Deleted);
+    }
+
+    #[test]
+    fn a_rename_skips_its_original_path() {
+        let status = parse_status("## main\0R  new.txt\0old.txt\0 M a.txt\0");
+        assert_eq!(status.entries.len(), 2);
+        assert_eq!(status.entries[0].path, PathBuf::from("new.txt"));
+        assert_eq!(status.entries[0].index, Change::Renamed);
+        assert_eq!(status.entries[1].path, PathBuf::from("a.txt"));
     }
 
     #[test]

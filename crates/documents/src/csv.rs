@@ -138,19 +138,33 @@ impl Table {
             .collect();
 
         if let Some((column, ascending)) = sort {
-            rows.sort_by(|left, right| {
-                let left = self.field(*left, column);
-                let right = self.field(*right, column);
-                match (left.parse::<f64>(), right.parse::<f64>()) {
-                    (Ok(left), Ok(right)) => left
-                        .partial_cmp(&right)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                    _ => left.to_lowercase().cmp(&right.to_lowercase()),
-                }
+            struct SortKey {
+                numeric: Option<f64>,
+                text: String,
+            }
+            let mut keyed: Vec<(usize, SortKey)> = rows
+                .into_iter()
+                .map(|index| {
+                    let value = self.field(index, column);
+                    (
+                        index,
+                        SortKey {
+                            numeric: value.parse::<f64>().ok(),
+                            text: value.to_lowercase(),
+                        },
+                    )
+                })
+                .collect();
+            keyed.sort_by(|left, right| match (left.1.numeric, right.1.numeric) {
+                (Some(left), Some(right)) => left
+                    .partial_cmp(&right)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                _ => left.1.text.cmp(&right.1.text),
             });
             if !ascending {
-                rows.reverse();
+                keyed.reverse();
             }
+            rows = keyed.into_iter().map(|(index, _)| index).collect();
         }
         rows
     }

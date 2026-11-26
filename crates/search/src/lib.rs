@@ -79,13 +79,8 @@ impl Match {
     }
 }
 
-/// Replace every match of `query` in `text`.
-///
-/// A literal query is matched literally, even if the replacement contains
-/// `$`; a regular-expression query keeps `$1` backreferences, which is what a
-/// user typing a regex expects. The count is the number of matches, not the
-/// number of resulting differences.
-pub fn replace_all(text: &str, query: &Query, replacement: &str) -> (String, usize) {
+/// Compile a query once, for a file loop.
+fn compiled_regex(query: &Query) -> Option<regex::Regex> {
     let pattern = if query.regex {
         query.pattern.clone()
     } else {
@@ -98,21 +93,45 @@ pub fn replace_all(text: &str, query: &Query, replacement: &str) -> (String, usi
     };
     let mut builder = regex::RegexBuilder::new(&pattern);
     builder.case_insensitive(!query.case_sensitive);
-    let Ok(regex) = builder.build() else {
-        return (text.to_string(), 0);
-    };
-    let count = regex.find_iter(text).count();
+    builder.build().ok()
+}
+
+/// Replace every match using an already compiled expression.
+fn replace_all_with(
+    regex: &regex::Regex,
+    text: &str,
+    query: &Query,
+    replacement: &str,
+) -> (String, usize) {
+    let mut count = 0;
+    let replaced = regex.replace_all(text, |captures: &regex::Captures| {
+        count += 1;
+        if query.regex {
+            let mut expanded = String::new();
+            captures.expand(replacement, &mut expanded);
+            expanded
+        } else {
+            replacement.to_string()
+        }
+    });
     if count == 0 {
-        return (text.to_string(), 0);
-    }
-    let replaced = if query.regex {
-        regex.replace_all(text, replacement).into_owned()
+        (text.to_string(), 0)
     } else {
-        regex
-            .replace_all(text, regex::NoExpand(replacement))
-            .into_owned()
+        (replaced.into_owned(), count)
+    }
+}
+
+/// Replace every match of `query` in `text`.
+///
+/// A literal query is matched literally, even if the replacement contains
+/// `$`; a regular-expression query keeps `$1` backreferences, which is what a
+/// user typing a regex expects. The count is the number of matches, not the
+/// number of resulting differences.
+pub fn replace_all(text: &str, query: &Query, replacement: &str) -> (String, usize) {
+    let Some(regex) = compiled_regex(query) else {
+        return (text.to_string(), 0);
     };
-    (replaced, count)
+    replace_all_with(&regex, text, query, replacement)
 }
 
 /// A replace running on a background thread.
@@ -147,7 +166,15 @@ impl Replace {
     /// Start replacing in `paths`.
     pub fn start(paths: Vec<PathBuf>, query: Query, replacement: String) -> Self {
         let (tx, results) = mpsc::channel();
+        let regex = compiled_regex(&query);
         std::thread::spawn(move || {
+            let Some(regex) = regex else {
+                let _ = tx.send(ReplaceUpdate::Error(
+                    "the replacement pattern is not a valid regular expression".to_string(),
+                ));
+                let _ = tx.send(ReplaceUpdate::Done);
+                return;
+            };
             for path in paths {
                 let bytes = match std::fs::read(&path) {
                     Ok(bytes) => bytes,
@@ -163,7 +190,7 @@ impl Replace {
                     let _ = tx.send(ReplaceUpdate::Skipped);
                     continue;
                 };
-                let (updated, count) = replace_all(&text, &query, &replacement);
+                let (updated, count) = replace_all_with(&regex, &text, &query, &replacement);
                 if count == 0 {
                     continue;
                 }
@@ -315,11 +342,17 @@ impl Search {
                 Ok(Update::Done) => {
                     changed = true;
                     self.running = false;
+                    if let Some(mut child) = self.child.take() {
+                        let _ = child.wait();
+                    }
                     break;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.running = false;
+                    if let Some(mut child) = self.child.take() {
+                        let _ = child.wait();
+                    }
                     break;
                 }
             }

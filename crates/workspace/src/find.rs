@@ -78,7 +78,7 @@ impl FindState {
         if query == self.computed_for && !self.matches.is_empty() {
             return false;
         }
-        self.computed_for = query.clone();
+        self.computed_for.clone_from(&query);
         let case_sensitive = self.case_sensitive || has_uppercase(&query);
         self.matches = find_all(text, &query, case_sensitive);
         if self.current >= self.matches.len() {

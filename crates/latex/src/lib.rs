@@ -273,15 +273,15 @@ impl Build {
         // The compiler writes its log to standard output and its complaints to
         // standard error; both matter, and both have to be read or the child
         // blocks on a full pipe.
-        for (reader, tag) in [
-            (
-                child.stdout.take().map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
-                "",
-            ),
-            (
-                child.stderr.take().map(|err| Box::new(err) as Box<dyn std::io::Read + Send>),
-                "",
-            ),
+        for reader in [
+            child
+                .stdout
+                .take()
+                .map(|out| Box::new(out) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|err| Box::new(err) as Box<dyn std::io::Read + Send>),
         ] {
             let Some(reader) = reader else { continue };
             let tx = tx.clone();
@@ -291,7 +291,6 @@ impl Build {
                         break;
                     }
                 }
-                let _ = tag;
             });
         }
 
@@ -323,8 +322,13 @@ impl Build {
                         self.success = status.success();
                         self.child = None;
                         changed = true;
-                        // Flush whatever is still in the pipe.
-                        while let Ok(line) = self.output.try_recv() {
+                        // The reader threads may still be draining the pipe: wait
+                        // for them to hang up, briefly, so no last line (and
+                        // no error in it) is lost.
+                        while let Ok(line) = self
+                            .output
+                            .recv_timeout(std::time::Duration::from_millis(500))
+                        {
                             self.lines.push(line);
                         }
                     }
@@ -788,5 +792,49 @@ mod process_tests {
         assert!(directory.join("main.pdf").exists(), "a PDF was written");
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+}
+
+
+/// The words of a LaTeX source line as they would be typeset: comments,
+/// commands and markup dropped. Used to find the line's text in the PDF.
+pub fn plain_words(line: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => break,
+            '\\' => {
+                // A command name is not text; `\\` and `\%` style escapes are.
+                if chars.peek().is_some_and(|n| n.is_ascii_alphabetic()) {
+                    while chars.peek().is_some_and(|n| n.is_ascii_alphabetic()) {
+                        chars.next();
+                    }
+                    text.push(' ');
+                } else {
+                    chars.next();
+                    text.push(' ');
+                }
+            }
+            '{' | '}' | '[' | ']' | '$' | '&' | '~' | '^' | '_' | '#' => text.push(' '),
+            other => text.push(other),
+        }
+    }
+    text.split_whitespace()
+        .map(str::to_string)
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .collect()
+}
+
+#[cfg(test)]
+mod plain_word_tests {
+    use super::plain_words;
+
+    #[test]
+    fn markup_is_not_text() {
+        assert_eq!(
+            plain_words("We \\textbf{show} that $x$ holds. % note"),
+            vec!["We", "show", "that", "x", "holds."]
+        );
     }
 }

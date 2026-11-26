@@ -47,12 +47,12 @@ case "$(uname -s)/$(uname -m)" in
     Darwin/x86_64)
         ASSET="pdfium-mac-x64.tgz"
         VERSION="${1:-8179}"
-        EXPECTED="${PDFIUM_SHA256:-}"
+        EXPECTED="${PDFIUM_SHA256:-b29bbfe37efcad5b443fa3556c0485ec96fc1992d5b19d84df49d48fbed1d0d2}"
         ;;
     Darwin/arm64)
         ASSET="pdfium-mac-arm64.tgz"
         VERSION="${1:-8179}"
-        EXPECTED="${PDFIUM_SHA256:-}"
+        EXPECTED="${PDFIUM_SHA256:-44b7c6f55dd33454d0909728bd0adf6c86a8e141b36f07a6b6f50e228e1dfb46}"
         ;;
     *)
         echo "unsupported platform: $(uname -s)/$(uname -m)" >&2
@@ -96,7 +96,14 @@ tar xzf "${TMP}/${ASSET}" -C "${DEST}"
 
 echo "installed to ${DEST}/lib"
 echo
-echo "The library is found automatically when the editor runs from the project"
-echo "directory. Set LIDE_PDFIUM_PATH to point at it explicitly otherwise:"
+LIBRARY="libpdfium.so"
+if [ "$(uname -s)" = "Darwin" ]; then
+    LIBRARY="libpdfium.dylib"
+fi
+
+echo "The next native build embeds this library in the editor. Set"
+echo "LIDE_EMBED_PDFIUM=0 to keep it external, or point that variable at a"
+echo "different library. At runtime LIDE_PDFIUM_PATH and a library beside the"
+echo "binary still take precedence."
 echo
-echo "  export LIDE_PDFIUM_PATH=${DEST}/lib/libpdfium.so"
+echo "  export LIDE_PDFIUM_PATH=${DEST}/lib/${LIBRARY}"

@@ -44,9 +44,10 @@ pub fn write_message(writer: &mut impl Write, body: &str) -> Result<(), Transpor
 /// Read one message, returning `None` at end of stream.
 pub fn read_message(reader: &mut impl BufRead) -> Result<Option<String>, TransportError> {
     let mut length: Option<usize> = None;
+    let mut line = String::new();
 
     loop {
-        let mut line = String::new();
+        line.clear();
         let read = reader.read_line(&mut line)?;
         if read == 0 {
             return Ok(None); // the server closed the stream
@@ -68,7 +69,9 @@ pub fn read_message(reader: &mut impl BufRead) -> Result<Option<String>, Transpo
 
     let mut body = vec![0u8; length];
     std::io::Read::read_exact(reader, &mut body)?;
-    Ok(Some(String::from_utf8_lossy(&body).into_owned()))
+    Ok(Some(String::from_utf8(body).unwrap_or_else(|error| {
+        String::from_utf8_lossy(error.as_bytes()).into_owned()
+    })))
 }
 
 /// Turn a `file://` URI into a path.

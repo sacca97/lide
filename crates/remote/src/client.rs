@@ -1,7 +1,7 @@
 //! The local side of the agent protocol: launch it, optionally over SSH, and
 //! turn requests into typed answers.
 
-use std::io::{BufReader, Write};
+use std::io::BufReader;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -123,17 +123,20 @@ impl Remote {
 
     /// List a directory, with `""` for the root.
     pub fn list(&mut self, path: &str) -> Result<Vec<Entry>, RemoteError> {
-        let value = self.request("list", json!({ "path": path }))?;
+        let mut value = self.request("list", json!({ "path": path }))?;
         Ok(serde_json::from_value(
-            value.get("entries").cloned().unwrap_or_else(|| json!([])),
+            value
+                .get_mut("entries")
+                .map(Value::take)
+                .unwrap_or_else(|| json!([])),
         )?)
     }
 
     /// Stat one path.
     pub fn stat(&mut self, path: &str) -> Result<Entry, RemoteError> {
-        let value = self.request("stat", json!({ "path": path }))?;
+        let mut value = self.request("stat", json!({ "path": path }))?;
         Ok(serde_json::from_value(
-            value.get("entry").cloned().unwrap_or(Value::Null),
+            value.get_mut("entry").map(Value::take).unwrap_or(Value::Null),
         )?)
     }
 
@@ -146,21 +149,33 @@ impl Remote {
                 "read",
                 json!({ "path": path, "offset": offset, "length": READ_CHUNK }),
             )?;
+            if data.is_empty() {
+                if let Some(size) = value.get("size").and_then(Value::as_u64) {
+                    let reserve = size.min(crate::protocol::MAX_WRITE_BYTES as u64) as usize;
+                    data.reserve_exact(reserve);
+                }
+            }
             let encoded = value
                 .get("data")
                 .and_then(Value::as_str)
                 .ok_or_else(|| RemoteError::Protocol("read has no data".to_string()))?;
-            let chunk = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|_| RemoteError::Protocol("read data is not base64".to_string()))?;
-            data.extend_from_slice(&chunk);
+            let start = data.len();
+            let room = encoded.len() / 4 * 3 + 3;
+            data.resize(start + room, 0);
+            let written = base64::engine::general_purpose::STANDARD
+                .decode_slice(encoded.as_bytes(), &mut data[start..])
+                .map_err(|_| {
+                    data.truncate(start);
+                    RemoteError::Protocol("read data is not base64".to_string())
+                })?;
+            data.truncate(start + written);
             if value.get("eof").and_then(Value::as_bool).unwrap_or(true) {
                 break;
             }
             let next = value
                 .get("next")
                 .and_then(Value::as_u64)
-                .unwrap_or(offset + chunk.len() as u64);
+                .unwrap_or(offset + written as u64);
             if next <= offset {
                 return Err(RemoteError::Protocol(
                     "the read offset did not advance".to_string(),
@@ -215,12 +230,11 @@ impl Remote {
             "params": params,
         }))?;
         lide_rpc::transport::write_message(&mut self.stdin, &body)?;
-        let _ = self.stdin.flush();
 
         loop {
             let body =
                 lide_rpc::transport::read_message(&mut self.stdout)?.ok_or(RemoteError::Closed)?;
-            let response: Value = serde_json::from_str(&body)?;
+            let mut response: Value = serde_json::from_str(&body)?;
             // Ignore anything that is not the answer to this request; future
             // versions may send notifications.
             if response.get("id").and_then(Value::as_u64) != Some(id) {
@@ -237,8 +251,8 @@ impl Remote {
                 });
             }
             return response
-                .get("result")
-                .cloned()
+                .get_mut("result")
+                .map(Value::take)
                 .ok_or_else(|| RemoteError::Protocol("the response has no result".to_string()));
         }
     }

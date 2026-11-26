@@ -390,6 +390,7 @@ impl Emulator {
         let cursor: RenderableCursor = content.cursor;
         let offset = content.display_offset as i32;
         let mut rows = vec![String::new(); self.size.rows];
+        let mut row_chars = vec![0usize; self.size.rows];
         let mut spans = vec![Vec::new(); self.size.rows];
 
         // One styled run per change of colour or weight; gaps use the theme's
@@ -455,13 +456,16 @@ impl Emulator {
             let row = &mut rows[line];
             let column = cell.point.column.0;
             // Pad up to this column: the grid skips cells whose glyph a wide
-            // character already covered.
-            while row.chars().count() < column {
+            // character already covered. `row_chars` keeps the count O(1)
+            // instead of rescanning the row's UTF-8 for every cell.
+            while row_chars[line] < column {
                 row.push(' ');
+                row_chars[line] += 1;
             }
             let c = cell.c;
-            if c != ' ' && c != '\0' && row.chars().count() == column {
+            if c != ' ' && c != '\0' && row_chars[line] == column {
                 row.push(c);
+                row_chars[line] += 1;
             }
         }
 
@@ -509,12 +513,26 @@ fn ansi_color(color: AnsiColor) -> Option<rune::Color> {
 
 /// The standard sixteen-colour palette, shared by named and indexed colours.
 fn palette_color(index: usize) -> rune::Color {
-    const PALETTE: [&str; 16] = [
-        "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd",
-        "#e5e5e5", "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6",
-        "#29b8db", "#ffffff",
+    const PALETTE: [(u8, u8, u8); 16] = [
+        (0x00, 0x00, 0x00),
+        (0xcd, 0x31, 0x31),
+        (0x0d, 0xbc, 0x79),
+        (0xe5, 0xe5, 0x10),
+        (0x24, 0x72, 0xc8),
+        (0xbc, 0x3f, 0xbc),
+        (0x11, 0xa8, 0xcd),
+        (0xe5, 0xe5, 0xe5),
+        (0x66, 0x66, 0x66),
+        (0xf1, 0x4c, 0x4c),
+        (0x23, 0xd1, 0x8b),
+        (0xf5, 0xf5, 0x43),
+        (0x3b, 0x8e, 0xea),
+        (0xd6, 0x70, 0xd6),
+        (0x29, 0xb8, 0xdb),
+        (0xff, 0xff, 0xff),
     ];
-    rune::color::hex(PALETTE[index.min(15)]).expect("a literal colour")
+    let (r, g, b) = PALETTE[index.min(15)];
+    rgb_to_color(r, g, b)
 }
 
 fn named_color(named: NamedColor) -> Option<rune::Color> {

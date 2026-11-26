@@ -18,14 +18,7 @@ rune-edit.workspace = true
 env_logger = "0.11"
 log.workspace = true
 anyhow.workspace = true
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-lide-text = { path = "../text" }
-lide-documents = { path = "../documents" }
-lide-editor = { path = "../editor" }
 lide-lsp = { path = "../lsp" }
 lide-latex = { path = "../latex" }
-lide-markdown = { path = "../markdown" }
-lide-pdf = { path = "../pdf" }
 lide-platform = { path = "../platform" }
 lide-workspace = { path = "../workspace" }

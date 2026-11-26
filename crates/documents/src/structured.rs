@@ -178,8 +178,6 @@ struct Frame {
 }
 
 fn format_xml(text: &str) -> Result<String, Problem> {
-    check_mixed_content(text)?;
-
     let mut reader = quick_xml::Reader::from_str(text);
     let mut writer = quick_xml::Writer::new_with_indent(Vec::new(), b' ', 2);
     let mut stack: Vec<Frame> = Vec::new();
@@ -206,7 +204,17 @@ fn format_xml(text: &str) -> Result<String, Problem> {
                 });
             }
             quick_xml::events::Event::End(_) => {
-                stack.pop();
+                if let Some(frame) = stack.pop() {
+                    if frame.has_child && frame.has_text {
+                        return Err(Problem {
+                            line: 0,
+                            column: 0,
+                            message:
+                                "an element mixes text with child elements; formatting would change it"
+                                    .to_string(),
+                        });
+                    }
+                }
             }
             quick_xml::events::Event::Empty(_) => {
                 if let Some(parent) = stack.last_mut() {
@@ -249,70 +257,6 @@ fn format_xml(text: &str) -> Result<String, Problem> {
     })?;
     out.push('\n');
     Ok(out)
-}
-
-/// Refuse mixed content before formatting, because inserting indentation into
-/// `<p>Hello <b>world</b></p>` changes the text a reader sees.
-fn check_mixed_content(text: &str) -> Result<(), Problem> {
-    let mut reader = quick_xml::Reader::from_str(text);
-    let mut stack: Vec<Frame> = Vec::new();
-
-    loop {
-        let event = reader.read_event().map_err(|error| {
-            let (line, column) = line_column(text, reader.error_position() as usize);
-            Problem {
-                line,
-                column,
-                message: error.to_string(),
-            }
-        })?;
-        match &event {
-            quick_xml::events::Event::Eof => break,
-            quick_xml::events::Event::Start(_) => {
-                if let Some(parent) = stack.last_mut() {
-                    parent.has_child = true;
-                }
-                stack.push(Frame {
-                    has_child: false,
-                    has_text: false,
-                });
-            }
-            quick_xml::events::Event::End(_) => {
-                if let Some(frame) = stack.pop() {
-                    if frame.has_child && frame.has_text {
-                        return Err(Problem {
-                            line: 0,
-                            column: 0,
-                            message:
-                                "an element mixes text with child elements; formatting would change it"
-                                    .to_string(),
-                        });
-                    }
-                }
-            }
-            quick_xml::events::Event::Empty(_) => {
-                if let Some(parent) = stack.last_mut() {
-                    parent.has_child = true;
-                }
-            }
-            quick_xml::events::Event::Text(fragment) => {
-                if !String::from_utf8_lossy(fragment).trim().is_empty() {
-                    if let Some(frame) = stack.last_mut() {
-                        frame.has_text = true;
-                    }
-                }
-            }
-            quick_xml::events::Event::CData(_)
-            | quick_xml::events::Event::GeneralRef(_) => {
-                if let Some(frame) = stack.last_mut() {
-                    frame.has_text = true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

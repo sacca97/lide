@@ -10,14 +10,7 @@ use lide_workspace::Workspace;
 
 /// Keep the tests from reading or writing the real settings file.
 fn isolate_settings() {
-    use std::sync::OnceLock;
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let directory = std::env::temp_dir().join("lide-test-config-lsp");
-        let _ = std::fs::create_dir_all(&directory);
-        // SAFETY: this runs once, before any test touches the settings.
-        unsafe { std::env::set_var("LIDE_CONFIG_DIR", &directory) };
-    });
+    crate::isolate_settings();
 }
 
 fn installed(program: &str) -> bool {
@@ -169,7 +162,7 @@ fn clangd_answers_a_hover() {
 }
 
 #[test]
-fn synctex_reports_a_missing_tool_instead_of_panicking() {
+fn synctex_reports_missing_data_instead_of_panicking() {
     isolate_settings();
 
     let root: PathBuf = std::env::temp_dir().join("lide-synctex-test");
@@ -186,11 +179,10 @@ fn synctex_reports_a_missing_tool_instead_of_panicking() {
 
     workspace.sync_forward();
 
-    // Either SyncTeX is not installed (a message, not a panic) or it ran and
-    // said it knows nothing: both are the same user-facing state.
+    // The fake PDF has no .synctex file. That is a notice, not a panic.
     assert!(
         workspace.notice.is_some(),
-        "a missing or unhelpful SyncTeX should be reported"
+        "missing SyncTeX data should be reported"
     );
     assert!(workspace.servers.all_diagnostics().is_empty());
 

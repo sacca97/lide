@@ -308,3 +308,20 @@ mod outline {
         assert!(document.outline().is_empty());
     }
 }
+
+#[test]
+fn a_phrase_is_found_nearest_to_the_wanted_height() {
+    use lide_pdf::render::TextChar;
+    use lide_pdf::view::find_phrase;
+    let mut chars = Vec::new();
+    for bottom in [700.0f32, 300.0] {
+        for (i, ch) in "the \u{FB01}nal word".chars().enumerate() {
+            let left = 50.0 + i as f32 * 6.0;
+            chars.push(TextChar { ch, left, right: left + 5.0, bottom, top: bottom + 10.0 });
+        }
+    }
+    let (low, _) = find_phrase(&chars, "the final", 305.0).expect("found");
+    assert!(chars[low].bottom < 400.0, "the lower copy is the near one");
+    let (high, _) = find_phrase(&chars, "the final", 695.0).expect("found");
+    assert!(chars[high].bottom > 400.0);
+}

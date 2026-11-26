@@ -25,9 +25,10 @@ verified.
 - Collapsible sidebar: `Ctrl+B`, the status bar's leftmost button, or the rail's
   chevron hides the whole bar; the same controls bring it back.
 - Flat tab strip with dirty markers and close buttons; two split panes, each
-  with its own document. Clicking a tab opens it in the pane chosen by the
-  **Left pane / Right pane** switch, and the focused pane carries an accent
-  rule.
+  with its own document and a draggable divider. Clicking a tab opens it in
+  the pane chosen by the **Left pane / Right pane** switch, dragging a tab
+  onto the other pane moves it there, and the **X** beside those controls
+  closes the split. The focused pane carries an accent rule.
 - Neutral status bar with branch, problems, language, cursor, size and server.
 - Light and dark themes; settings persist in `$XDG_CONFIG_HOME/lide/settings.json`
   (override with `LIDE_CONFIG_DIR`).
@@ -144,13 +145,15 @@ not recognised report an error rather than being guessed at.
 - Streaming output panel; `texres`'s `error:` / `--> path:line:column` blocks
   and the classic `path:line:` / `! … / l.N` forms are clickable.
 - A successful build opens the PDF **beside the source** (the source stays in
-  the left pane and the PDF takes the right); **builds only when a `.tex` file
-  is saved** (no timers, no watcher rebuilds), plus the explicit `Ctrl+Shift+B`.
-  "LaTeX: open PDF beside source" in the palette does the same for an existing
-  PDF.
-- Forward SyncTeX (source line → PDF page) and inverse (PDF point → source).
-  Double-click a point on the PDF to go to the source; the status bar's **PDF** /
-  **Source** chip or `Ctrl+Shift+J` jumps the other way.
+  the left pane and the PDF takes the right). The tab strip's **Preview**
+  button opens an existing PDF without building; the palette command does the
+  same. **Builds only when a changed `.tex` file is saved** (no timers, no
+  watcher rebuilds), plus the explicit `Ctrl+Shift+B`.
+- Forward SyncTeX (source line → PDF page) and inverse (PDF point → source),
+  read directly from the `.synctex.gz` the build already writes; no separate
+  `synctex` executable is needed. Double-click a point on the PDF to go to the
+  source, and `Cmd`/`Ctrl`-click a source line to go to the PDF. The status
+  bar's **PDF** / **Source** chip or `Ctrl+Shift+J` does the same.
 - BibTeX/Biber handled by `texres`.
 
 ## Settings
@@ -164,7 +167,11 @@ not recognised report an error rather than being guessed at.
 | `sidebar_width` | sidebar width in points |
 | `show_sidebar` | sidebar visibility |
 | `split` | whether the editor starts split |
-| `line_numbers` | gutter visibility |
+| `split_ratio` | share of the width the left split pane takes |
+| `markdown_ratio` | share of a Markdown tab the source takes |
+| `show_outline` | Markdown/PDF outline visibility |
+| `soft_wrap` | wrap text to the editor width (on by default) |
+| `line_numbers` | gutter visibility (hidden while soft wrap is on) |
 | `recent_files`, `recent_projects` | recent lists shown in the palette |
 | `latex_engine` | `auto`, `pdflatex`, `xelatex`, `lualatex` |
 | `latex_output_directory` | build output directory |
@@ -189,6 +196,7 @@ clipboard, while `Ctrl+C` still sends the shell an interrupt.
 | `Ctrl+F` / `Ctrl+H` | Find / replace in file |
 | `Ctrl+Shift+F` | Search the workspace (search the terminal when it is in front) |
 | `Ctrl+B` / `Ctrl+\` | Toggle sidebar / split |
+| `Ctrl+Shift+O` | Toggle the Markdown/PDF outline |
 | `F12` / `Shift+F12` | Go to definition / find references |
 | `Ctrl+K` | Hover information |
 | `Ctrl+.` | Code actions |

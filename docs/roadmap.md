@@ -135,11 +135,11 @@ conflict views.
 | Build output and errors | done: a panel with the command, the log and the error count; `texres`'s `error:` / `--> file:line:column` blocks and the classic `file:line:` / `! …` / `l.N` forms are parsed |
 | Build errors navigate to source | done: each error is a row in the build panel that opens the file at its line |
 | Integrated PDF preview | done, through the PDF viewer |
-| Forward and inverse SyncTeX | done: `synctex view` from the source line, `synctex edit` from the place on the page |
+| Forward and inverse SyncTeX | done: the `.synctex.gz` is parsed directly, with no `synctex` executable |
 | Build recipes and engine selection | done: `texres` by default, with `-pdf`, `-xelatex` or `-lualatex` when a document needs an explicit engine; the palette cycles the engine and the choice is remembered |
 | Build directory and auxiliary files | done: "LaTeX: output directory" sets `latex_output_directory`; the build passes `-output-directory DIR`, and the PDF and SyncTeX file go there |
 | BibTeX and Biber | done through `texres`, which runs the bibliography tool the document asks for |
-| Build on save | done: saving a `.tex` file schedules its build for the next frame; there is no timer and no watcher-driven rebuild |
+| Build on save | done: saving a changed `.tex` file schedules its build for the next frame; an unchanged save is a no-op, and there is no timer or watcher-driven rebuild |
 
 The build runner is a general "program, arguments, directory" runner with
 `texres` as the LaTeX command, which is what makes it testable on a machine

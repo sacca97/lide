@@ -404,8 +404,15 @@ impl Builder {
 
     /// Flush any partially collected state at the end of the stream.
     fn finish(&mut self) {
-        while !self.inline_stack.is_empty() {
-            self.pop_inline(InlineFrameKind::Emphasis);
+        while let Some(frame) = self.inline_stack.pop() {
+            let inline = match frame {
+                InlineFrame::Emphasis(children) => Inline::Emphasis(children),
+                InlineFrame::Strong(children) => Inline::Strong(children),
+                InlineFrame::Strikethrough(children) => Inline::Strikethrough(children),
+                InlineFrame::Link { dest, title, text } => Inline::Link { text, dest, title },
+                InlineFrame::Image { dest, title, alt } => Inline::Image { alt, dest, title },
+            };
+            self.push_inline(inline);
         }
         if !self.code.is_empty() {
             let code = std::mem::take(&mut self.code);
@@ -460,13 +467,15 @@ fn non_empty(value: pulldown_cmark::CowStr<'_>) -> Option<String> {
 /// walked again with its byte ranges: a heading's range starts at the `#`, and
 /// the line is however many newlines came before it.
 pub fn outline(source: &str) -> Vec<crate::ast::OutlineEntry> {
-    use crate::ast::{inline_text, slugify, OutlineEntry};
+    use crate::ast::{slugify, OutlineEntry};
 
     let parser = Parser::new_ext(source, default_options()).into_offset_iter();
     let mut entries = Vec::new();
-    let mut used = Vec::new();
+    let mut used = std::collections::HashSet::new();
     let mut heading: Option<(u8, usize)> = None;
     let mut text = String::new();
+    let mut last_offset = 0;
+    let mut line = 1;
 
     for (event, range) in parser {
         match event {
@@ -476,7 +485,9 @@ pub fn outline(source: &str) -> Vec<crate::ast::OutlineEntry> {
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, offset)) = heading.take() {
-                    let line = 1 + source[..offset.min(source.len())].matches('\n').count() as u64;
+                    let offset = offset.min(source.len()).max(last_offset);
+                    line += source[last_offset..offset].matches('\n').count() as u64;
+                    last_offset = offset;
                     let anchor =
                         crate::ast::unique_anchor(&slugify(&text), &mut used);
                     entries.push(OutlineEntry {
@@ -494,7 +505,6 @@ pub fn outline(source: &str) -> Vec<crate::ast::OutlineEntry> {
         }
     }
 
-    let _ = inline_text;
     entries
 }
 

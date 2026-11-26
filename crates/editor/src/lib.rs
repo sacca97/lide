@@ -98,15 +98,17 @@ impl Editor {
                 path: location.to_string(),
             }
         })?;
-        let mut edit = TextEdit::new(buffer.to_text());
+        let line_ending = buffer.line_ending();
+        let encoding = buffer.encoding();
+        let mut edit = TextEdit::new(buffer.into_text());
         // Start at the top of the file rather than at its end.
         edit.set_caret(0);
         Ok(Self {
             saved_text: edit.text.clone(),
             edit,
             location: Some(location),
-            line_ending: buffer.line_ending(),
-            encoding: buffer.encoding(),
+            line_ending,
+            encoding,
             store,
         })
     }
@@ -169,9 +171,14 @@ impl Editor {
         }
     }
 
+    /// The number of lines and the longest line's character count.
+    pub fn line_stats(&self) -> (usize, usize) {
+        line_stats(&self.edit.text)
+    }
+
     /// The number of lines in the document.
     pub fn line_count(&self) -> usize {
-        self.edit.text.lines().count().max(1)
+        self.line_stats().0
     }
 
     /// Write the document back to disk.
@@ -197,7 +204,7 @@ impl Editor {
         };
         let reloaded = Self::open_with(self.store.clone(), location)?;
         self.edit = reloaded.edit;
-        self.saved_text = self.edit.text.clone();
+        self.saved_text = reloaded.saved_text;
         self.line_ending = reloaded.line_ending;
         self.encoding = reloaded.encoding;
         Ok(())
@@ -208,8 +215,10 @@ impl Editor {
     /// The line ending of the file is remembered when it is opened and
     /// reapplied here, so a file is written back byte for byte.
     fn bytes(&self) -> Vec<u8> {
-        let mut bytes = self.encoding.bom().to_vec();
-        bytes.extend_from_slice(self.line_ending.apply(&self.edit.text).as_bytes());
+        let text = self.line_ending.apply(&self.edit.text);
+        let mut bytes = Vec::with_capacity(self.encoding.bom().len() + text.len());
+        bytes.extend_from_slice(self.encoding.bom());
+        bytes.extend_from_slice(text.as_bytes());
         bytes
     }
 
@@ -217,6 +226,17 @@ impl Editor {
     pub fn local_path(&self) -> Option<&Path> {
         self.location.as_ref().and_then(Location::as_local)
     }
+}
+
+/// Measure a document once for the gutter.
+fn line_stats(text: &str) -> (usize, usize) {
+    let mut lines = 0;
+    let mut longest = 0;
+    for line in text.lines() {
+        lines += 1;
+        longest = longest.max(line.chars().count());
+    }
+    (lines.max(1), longest)
 }
 
 #[cfg(test)]

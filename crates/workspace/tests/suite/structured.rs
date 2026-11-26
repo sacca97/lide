@@ -7,14 +7,7 @@ use lide_workspace::Workspace;
 
 /// Keep the tests from reading or writing the real settings file.
 fn isolate_settings() {
-    use std::sync::OnceLock;
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let directory = std::env::temp_dir().join("lide-test-config-structured");
-        let _ = std::fs::create_dir_all(&directory);
-        // SAFETY: this runs once, before any test touches the settings.
-        unsafe { std::env::set_var("LIDE_CONFIG_DIR", &directory) };
-    });
+    crate::isolate_settings();
 }
 
 fn scratch(name: &str) -> PathBuf {

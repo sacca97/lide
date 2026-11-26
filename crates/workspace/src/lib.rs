@@ -6,6 +6,8 @@
 //! in the middle and the status bar at the bottom.
 
 pub mod command;
+mod view;
+pub use view::view;
 pub mod dialog;
 pub mod csv_view;
 pub mod diff;
@@ -26,18 +28,15 @@ use std::path::{Path, PathBuf};
 use lide_documents::{detect_kind, DocumentKind};
 use lide_editor::Editor;
 use lide_pdf::view::PdfView;
-use rune::{col, el, icon, row, text, text_input, Cx, El, Live, ScrollPos, ScrollSpec, Tx, WheelEvent};
 use rune_edit::TextEdit;
-use rune_kit::markdown::{Markdown, MarkdownStyle};
-use rune_kit::syntax::{highlight, lang_for_path, SyntaxTheme};
-use crate::dialog::Dialog;
-use rune_kit::{root, Button, ControlSize, Kit, List, ListItem, TextInput};
+use rune::Live;
+use rune_kit::Kit;
 
 use crate::command::PaletteState;
 use crate::find::FindState;
 use crate::servers::{Outcome, Servers};
 use crate::settings::Settings;
-use crate::tree::{FileTree, TreeNode};
+use crate::tree::FileTree;
 
 /// How long to wait between automatic completion requests, in seconds.
 const COMPLETION_DEBOUNCE: f64 = 0.15;
@@ -58,6 +57,15 @@ const MAX_SIDEBAR_WIDTH: f32 = 560.0;
 /// Keep a requested sidebar width inside its limits.
 fn clamp_sidebar_width(width: f32) -> f32 {
     width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
+/// The share of the editor each pane keeps when the split is dragged.
+const MIN_SPLIT_RATIO: f32 = 0.2;
+const MAX_SPLIT_RATIO: f32 = 0.8;
+
+/// Keep a requested split ratio inside its limits.
+fn clamp_split_ratio(ratio: f32) -> f32 {
+    ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
 }
 
 /// How deep the file tree is scanned.
@@ -240,6 +248,43 @@ pub struct Workspace {
     remote_open: Option<std::sync::mpsc::Receiver<Result<Editor, String>>>,
     /// The width the sidebar had when a resize drag began.
     sidebar_drag_start: Option<f32>,
+    /// The split ratio when a divider drag began.
+    split_drag_start: Option<f32>,
+    /// The Markdown source ratio when its divider drag began.
+    markdown_drag_start: Option<f32>,
+    /// The split area's width from the previous layout, so a drag can turn
+    /// pointer travel into a ratio.
+    split_width: std::cell::Cell<f32>,
+    /// The width of each Markdown source-and-preview area, per pane.
+    markdown_widths: [std::cell::Cell<f32>; 2],
+    /// The width of each pane's PDF scroll area, from the last layout.
+    pdf_widths: [std::cell::Cell<f32>; 2],
+    /// The vertical scroll of each editor pane, so a Cmd/Ctrl-click maps a
+    /// point to a source line.
+    editor_scrolls: Vec<Live<[f32; 2]>>,
+    /// The wrap width in columns of each editor pane, from the last layout.
+    pub(crate) wrap_columns: [std::cell::Cell<usize>; 2],
+    /// Scrolls the app still has to apply: the scroll area's key, the offset,
+    /// and how many frames to keep asking. A page that has only just been
+    /// shown has no height yet, so the first ask may be clamped to nothing.
+    pub scroll_requests: Vec<(String, f32, u8)>,
+    /// When a key was last pressed, and where the caret of the focused
+    /// editor was at the last poll: a caret that moves with Cmd/Ctrl held and
+    /// no key pressed is a Cmd-click.
+    pub(crate) last_key_at: f64,
+    caret_seen: Option<(usize, usize)>,
+    /// Whether Cmd (Ctrl off macOS) is held, for source-to-PDF clicks.
+    pub primary_modifier: bool,
+    /// The presses on the PDF pages: when, which pane and where.
+    pdf_presses: Vec<(f64, u8, f32, f32)>,
+    /// The pane that was double clicked on a PDF page.
+    pdf_double_click: Option<u8>,
+    /// The two pane rectangles from the previous layout, for tab drops.
+    split_left_rect: std::cell::Cell<[f32; 4]>,
+    split_right_rect: std::cell::Cell<[f32; 4]>,
+    /// An outline override for this run only, used by headless snapshots so a
+    /// scene does not rewrite the user's `show_outline` setting.
+    pub outline_override: Option<bool>,
     /// Directories the user collapsed in the file tree.
     pub collapsed_paths: std::collections::HashSet<PathBuf>,
 }
@@ -291,6 +336,22 @@ impl Default for Workspace {
             latex_build_after_save: false,
             remote_open: None,
             sidebar_drag_start: None,
+            split_drag_start: None,
+            markdown_drag_start: None,
+            split_width: std::cell::Cell::new(0.0),
+            markdown_widths: [std::cell::Cell::new(0.0), std::cell::Cell::new(0.0)],
+            pdf_widths: [std::cell::Cell::new(0.0), std::cell::Cell::new(0.0)],
+            editor_scrolls: (0..2).map(|_| Live::new([0.0, 0.0])).collect(),
+            wrap_columns: [std::cell::Cell::new(0), std::cell::Cell::new(0)],
+            scroll_requests: Vec::new(),
+            primary_modifier: false,
+            last_key_at: -10.0,
+            caret_seen: None,
+            pdf_presses: Vec::new(),
+            pdf_double_click: None,
+            split_left_rect: std::cell::Cell::new([0.0; 4]),
+            split_right_rect: std::cell::Cell::new([0.0; 4]),
+            outline_override: None,
             collapsed_paths: std::collections::HashSet::new(),
         }
     }
@@ -432,6 +493,42 @@ impl Document {
             Document::Notebook(_) => None,
         }
     }
+}
+
+/// Pick the source line a clicked word is on, among those near the line SyncTeX
+/// named, and the column of the word in it.
+///
+/// `words` are the folded words before, at and after the click. The longest
+/// run of them that one line holds wins, then the nearest line.
+fn refine_line(text: &str, line: u64, column: usize, words: &(String, String, String)) -> (u64, usize) {
+    let (before, word, after) = words;
+    if word.is_empty() {
+        return (line, column);
+    }
+    let needles = [
+        format!("{before}{word}{after}"),
+        format!("{before}{word}"),
+        format!("{word}{after}"),
+        word.clone(),
+    ];
+    let first = line.saturating_sub(8).max(1);
+    let folded: Vec<(u64, String, &str)> = text
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i as u64 + 1, lide_pdf::view::fold_text(l), l))
+        .filter(|(n, _, _)| *n >= first && *n <= line + 8)
+        .collect();
+    for needle in needles.iter().filter(|n| n.chars().count() >= 3) {
+        let best = folded
+            .iter()
+            .filter(|(_, f, _)| f.contains(needle.as_str()))
+            .min_by_key(|(n, _, _)| n.abs_diff(line));
+        if let Some((n, _, raw)) = best {
+            let column = raw.to_lowercase().find(word.as_str()).unwrap_or(0);
+            return (*n, column);
+        }
+    }
+    (line, column)
 }
 
 impl Workspace {
@@ -984,6 +1081,34 @@ impl Workspace {
         }
     }
 
+    /// Move a tab into the left or right pane after a drag.
+    ///
+    /// Dropping a tab on the pane that already shows it only focuses that
+    /// pane. Dropping it on the other pane swaps the two documents, so the
+    /// same document is never shown twice.
+    pub fn drop_tab_to_pane(&mut self, index: usize, pane: usize) {
+        if index >= self.documents.len() {
+            return;
+        }
+        if self.split_document.is_none() {
+            if pane == 1 && self.documents.len() > 1 {
+                if index == self.active {
+                    self.active = (index + 1) % self.documents.len();
+                }
+                self.split_document = Some(index);
+                self.focused_pane = 1;
+                self.settings.split = true;
+                self.settings.save();
+            } else {
+                self.focused_pane = 0;
+                self.select_tab(index);
+            }
+            return;
+        }
+        self.focused_pane = pane.min(1);
+        self.select_tab(index);
+    }
+
     /// Show a message in the status bar.
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
@@ -1132,6 +1257,11 @@ impl Workspace {
         let Some(document) = self.documents.get_mut(index) else {
             return;
         };
+        // There is nothing to write. Skipping the write also keeps a save with
+        // no delta from scheduling another LaTeX build.
+        if !document.is_dirty() {
+            return;
+        }
         let saved_path = document.path().map(|path| path.to_path_buf());
         let result = match document {
             Document::Text(editor) => editor.save(),
@@ -1327,6 +1457,56 @@ impl Workspace {
         self.settings.save();
     }
 
+    /// Whether Markdown previews and PDFs show their outline.
+    pub fn show_outline(&self) -> bool {
+        self.outline_override.unwrap_or(self.settings.show_outline)
+    }
+
+    /// Show or hide the outline in Markdown previews and PDFs.
+    pub fn toggle_outline(&mut self) {
+        self.settings.show_outline = !self.show_outline();
+        self.outline_override = None;
+        self.settings.save();
+    }
+
+    /// Remember whether the primary modifier is held.
+    ///
+    /// The app hears every change of the held modifiers, so a click with
+    /// Cmd (Ctrl off macOS) can be told from a plain one.
+    pub fn set_primary_modifier(&mut self, held: bool) {
+        self.primary_modifier = held;
+    }
+
+    /// Note a press on a PDF page, in PDF points.
+    ///
+    /// Two presses close together on the same page are a double click. The
+    /// editor's own double press is stricter, and a hand rarely holds the
+    /// pointer still enough for it.
+    pub fn note_pdf_press(&mut self, pane: usize, x: f32, y: f32) {
+        let now = self.now;
+        let pane = pane as u8;
+        self.pdf_presses
+            .retain(|(at, other, _, _)| now - *at < 0.8 && *other == pane);
+        if let Some((at, _, before_x, before_y)) = self.pdf_presses.last().copied() {
+            if now - at < 0.45
+                && (before_x - x).abs() < 14.0
+                && (before_y - y).abs() < 14.0
+            {
+                self.pdf_double_click = Some(pane);
+            }
+        }
+        self.pdf_presses.push((now, pane, x, y));
+        if self.pdf_presses.len() > 8 {
+            self.pdf_presses.remove(0);
+        }
+    }
+
+    /// Wrap long lines, or scroll them horizontally.
+    pub fn toggle_soft_wrap(&mut self) {
+        self.settings.soft_wrap = !self.settings.soft_wrap;
+        self.settings.save();
+    }
+
     /// Jump between the LaTeX source and its PDF.
     ///
     /// A `.tex` source goes to the line in the PDF; a PDF goes back to the
@@ -1367,14 +1547,41 @@ impl Workspace {
             return;
         }
 
-        let synctex = lide_latex::SyncTex::new(pdf.parent().unwrap_or(std::path::Path::new(".")));
-        match synctex.forward(&tex, line, 0, &pdf) {
+        // The cursor may be in an included chapter, not in the main file.
+        let source = self
+            .documents
+            .get(self.focused_index())
+            .and_then(|document| document.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "tex"))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| tex.clone());
+
+        // The build directory is where the source lives: the sidecar of a
+        // PDF that was moved stays there.
+        let build_directory = tex
+            .parent()
+            .or_else(|| pdf.parent())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let phrases = self.source_phrases(&source, line);
+        let synctex = lide_latex::SyncTex::new(build_directory);
+        match synctex.forward(&source, line, 0, &pdf) {
             Ok(Some(point)) => {
-                self.show_pdf_beside(&tex, &pdf);
+                self.show_pdf_beside(&source, &pdf);
                 let pdf_index = self.split_document.unwrap_or(self.active);
                 if let Some(Document::Pdf(view)) = self.documents.get_mut(pdf_index) {
-                    view.go_to_page(point.page.saturating_sub(1));
-                    view.pointer = Some((point.x, point.y));
+                    let page = point.page.saturating_sub(1);
+                    let height = view.page_height(page).unwrap_or(792.0);
+                    view.go_to_page(page);
+                    // SyncTeX's y is measured from the top; the viewer's
+                    // pointer and text layer use the PDF's bottom-left origin.
+                    view.pointer = Some((point.x, (height - point.y).max(0.0)));
+                    // SyncTeX is exact to the line of the page; the words of the
+                    // source line find the place within it, once the page's
+                    // text is there.
+                    view.set_sync_goal(phrases.clone(), point.y);
+                    let offset = view.scroll_to_height(point.y);
+                    let pane = if self.split_document == Some(pdf_index) { 1 } else { 0 };
+                    self.request_scroll(format!("pdf-scroll-{pane}"), offset);
                 }
             }
             Ok(None) => self.notice = Some(format!("SyncTeX knows nothing about line {line}")),
@@ -1382,14 +1589,89 @@ impl Workspace {
         }
     }
 
+    /// The words to look for on the PDF page for a source line, longest
+    /// phrase first, starting at the caret when it is on that line.
+    fn source_phrases(&self, path: &Path, line: u64) -> Vec<String> {
+        let Some(text) = self.source_text(path) else {
+            return Vec::new();
+        };
+        let Some(line_text) = text.lines().nth(line.saturating_sub(1) as usize) else {
+            return Vec::new();
+        };
+        let mut start = 0usize;
+        if let Some(editor) = self.documents.get(self.focused_index()).and_then(|d| d.editor()) {
+            if editor.cursor_line() as u64 == line {
+                let column = editor.cursor_column().saturating_sub(1);
+                start = line_text
+                    .char_indices()
+                    .nth(column)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+        }
+        let mut words = lide_latex::plain_words(&line_text[start..]);
+        if words.is_empty() && start > 0 {
+            words = lide_latex::plain_words(line_text);
+        }
+        let mut phrases = Vec::new();
+        for count in [5usize, 3, 2] {
+            if words.len() >= count {
+                phrases.push(words[..count].join(" "));
+            }
+        }
+        if let Some(longest) = words.iter().filter(|w| w.chars().count() >= 4).max_by_key(|w| w.len()) {
+            phrases.push(longest.clone());
+        }
+        phrases
+    }
+
+    /// The text of a source file: the open buffer, or the file on disk.
+    fn source_text(&self, path: &Path) -> Option<String> {
+        self.documents
+            .iter()
+            .find(|document| document.path() == Some(path))
+            .and_then(|document| document.text().map(str::to_string))
+            .or_else(|| std::fs::read_to_string(path).ok())
+    }
+
+    /// Ask the app to scroll the area with this key to `offset`.
+    fn request_scroll(&mut self, key: String, offset: f32) {
+        self.scroll_requests.retain(|(other, _, _)| *other != key);
+        self.scroll_requests.push((key, offset, 12));
+    }
+
+    /// Scroll the left editor pane so that `line` is in view.
+    fn reveal_source_line(&mut self, line: u64) {
+        let line_height = self.settings.line_height().max(1.0);
+        let row = if self.settings.soft_wrap {
+            let columns = self.wrap_columns[0].get();
+            let text = self.active_document().and_then(|d| d.text()).unwrap_or_default();
+            view::editor::visual_row_of(text, line, columns)
+        } else {
+            line.saturating_sub(1) as usize
+        };
+        let offset = (row as f32 * line_height - 4.0 * line_height).max(0.0);
+        self.request_scroll("editor-scroll-0".to_string(), offset);
+    }
+
     /// Show the source of the place the pointer was last at on the PDF.
     pub fn sync_inverse(&mut self) {
-        let (pdf, page, (x, y)) = match self.documents.get(self.focused_index()) {
-            Some(Document::Pdf(view)) => (
-                view.path().to_path_buf(),
-                view.page(),
-                view.pointer.unwrap_or((306.0, 396.0)),
-            ),
+        let words;
+        let (pdf, page, x, y) = match self.documents.get(self.focused_index()) {
+            Some(Document::Pdf(view)) => {
+                let page = view.page();
+                let height = view.page_height(page).unwrap_or(792.0);
+                let (x, bottom) = view.pointer.unwrap_or((306.0, height / 2.0));
+                words = view.words_around(x, bottom);
+                // The pointer is in bottom-left PDF points; SyncTeX's y is
+                // measured from the top of the page.
+                (
+                    view.path().to_path_buf(),
+                    page,
+                    x,
+                    (height - bottom).max(0.0),
+                )
+            }
             _ => {
                 self.notice = Some("open a PDF to sync from".to_string());
                 return;
@@ -1400,9 +1682,18 @@ impl Workspace {
         match synctex.inverse(&pdf, page + 1, x, y) {
             Ok(Some(source)) => {
                 self.show_pdf_beside(&source.path, &pdf);
+                // SyncTeX names the line of the page's text; the clicked word
+                // says which of the nearby source lines it was.
+                let (line, column) = match (&words, self.source_text(&source.path)) {
+                    (Some(words), Some(text)) => {
+                        refine_line(&text, source.line, source.column as usize, words)
+                    }
+                    _ => (source.line, source.column as usize),
+                };
                 if let Some(editor) = self.active_editor_mut() {
-                    editor.go_to(source.line, source.column as usize);
+                    editor.go_to(line, column);
                 }
+                self.reveal_source_line(line);
             }
             Ok(None) => self.notice = Some("SyncTeX knows nothing about that place".to_string()),
             Err(error) => self.notice = Some(error),
@@ -1508,7 +1799,14 @@ impl Workspace {
             self.notice = Some("build the document first".to_string());
             return;
         }
-        self.show_pdf_beside(&tex, &pdf);
+        let source = self
+            .documents
+            .get(self.focused_index())
+            .and_then(|document| document.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "tex"))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| tex.clone());
+        self.show_pdf_beside(&source, &pdf);
     }
 
     /// Put `tex` in the left pane and `pdf` in the right.
@@ -1535,34 +1833,40 @@ impl Workspace {
         }
     }
 
-    /// The `.tex` file to build.
+    /// The main `.tex` file to build.
+    ///
+    /// An included chapter is not the build target. Prefer `main.tex`, then
+    /// the active file when it is a root document, then the shallowest file
+    /// that nothing else includes.
     fn latex_document(&self) -> Option<PathBuf> {
-        if let Some(path) = self
+        let active = self
             .documents
             .get(self.focused_index())
             .and_then(|document| document.path())
-        {
-            if path
-                .extension()
-                .map(|extension| extension == "tex")
-                .unwrap_or(false)
-            {
-                return Some(path.to_path_buf());
-            }
+            .filter(|path| path.extension().is_some_and(|extension| extension == "tex"))
+            .map(Path::to_path_buf);
+        let Some(root) = self.root.as_ref() else {
+            return active;
+        };
+
+        let main = root.join("main.tex");
+        if main.is_file() {
+            return Some(main);
         }
-        let root = self.root.as_ref()?;
+
         let mut found: Vec<PathBuf> = Vec::new();
         collect_tex(root, &mut found, 0);
-        // `main.tex` first, then whatever there is.
         found.sort();
-        found
+        let roots = tex_roots(&found);
+        if let Some(active) = active.as_ref().filter(|path| roots.contains(path)) {
+            return Some(active.clone());
+        }
+        roots
             .iter()
-            .find(|path| {
-                path.file_name()
-                    .map(|name| name == "main.tex")
-                    .unwrap_or(false)
-            })
+            .find(|path| path.file_stem() == root.file_name())
             .cloned()
+            .or_else(|| roots.first().cloned())
+            .or(active)
             .or_else(|| found.into_iter().next())
     }
 
@@ -1882,6 +2186,7 @@ impl Workspace {
         self.now = now;
         let mut changed = self.poll_pdfs();
         changed |= self.poll_pdf_double_click();
+        changed |= self.poll_source_click();
         changed |= self.poll_files();
         if let Some(search) = self.search.as_mut() {
             changed |= search.poll();
@@ -2525,26 +2830,78 @@ impl Workspace {
             return false;
         };
         let mut changed = false;
-        for document in &mut self.documents {
+        let mut scrolls = Vec::new();
+        for (index, document) in self.documents.iter_mut().enumerate() {
             if let Document::Pdf(pdf) = document {
+                let pane = if self.split_document == Some(index) { 1 } else { 0 };
+                pdf.fit_to_width(self.pdf_widths[pane].get());
                 changed |= pdf.poll(cache);
+                if let Some(offset) = pdf.take_scroll_wanted() {
+                    scrolls.push((index, offset));
+                }
             }
+        }
+        for (index, offset) in scrolls {
+            let pane = if self.split_document == Some(index) { 1 } else { 0 };
+            self.request_scroll(format!("pdf-scroll-{pane}"), offset);
         }
         changed
     }
 
+    /// A Cmd/Ctrl-click on a LaTeX source shows the same place in the PDF.
+    ///
+    /// The text field places the caret exactly where it was clicked, wrapped
+    /// lines included, so the jump starts from the caret instead of from a
+    /// guess about the layout. A caret that moves while no key was pressed is
+    /// a click; arrows and typing arrive with a key event just before.
+    fn poll_source_click(&mut self) -> bool {
+        let index = self.focused_index();
+        let seen = self
+            .documents
+            .get(index)
+            .filter(|document| {
+                document
+                    .path()
+                    .is_some_and(|path| path.extension().is_some_and(|e| e == "tex"))
+            })
+            .and_then(|document| document.editor())
+            .map(|editor| (index, editor.edit.focus));
+        let before = std::mem::replace(&mut self.caret_seen, seen);
+        let moved = matches!((before, seen), (Some(a), Some(b)) if a.0 == b.0 && a.1 != b.1);
+        if moved && self.primary_modifier && self.now - self.last_key_at > 0.25 {
+            self.sync_forward();
+            return true;
+        }
+        false
+    }
+
     /// A double click on a PDF page asks for its source, through SyncTeX.
     fn poll_pdf_double_click(&mut self) -> bool {
+        // The framework's double press, as a second way in.
         let mut requested = None;
         for (index, document) in self.documents.iter_mut().enumerate() {
             if let Document::Pdf(pdf) = document {
                 if pdf.double_click {
                     pdf.double_click = false;
                     requested = Some(index);
-                    break;
                 }
             }
         }
+
+        // The editor's own double click, with a hand-sized tolerance.
+        if let Some(pane) = self.pdf_double_click.take() {
+            let index = if pane == 1 {
+                self.split_document
+            } else {
+                Some(self.active)
+            };
+            if index.is_some() {
+                self.focused_pane = pane as usize;
+                self.sync_inverse();
+                return true;
+            }
+        }
+
         let Some(index) = requested else {
             return false;
         };
@@ -2675,2661 +3032,7 @@ impl Workspace {
         };
         self.changed_on_disk.retain(|other| other != &path);
     }
-}
 
-/// The theme tokens for the current appearance.
-pub fn kit(dark: bool) -> &'static Kit {
-    crate::theme::kit(dark)
-}
-
-/// Draw the whole window.
-pub fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
-    let k = kit(s.dark());
-    let mut overlays = Vec::new();
-
-    s.terminal_rect.set(cx.layout("terminal-area"));
-
-    let mut main = row().w_full().grow(1.0).min_h(0.0);
-    if s.settings.show_sidebar {
-        main = main.child(sidebar(s, k)).child(sidebar_resizer(k));
-    }
-    main = main.child(
-        col()
-            .grow(1.0)
-            .min_w(0.0)
-            .min_h(0.0)
-            .padding(CARD_GAP)
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .min_h(0.0)
-                    .radius(10.0)
-                    .clip_rounded(10.0)
-                    .border(1.0, k.c.border_base)
-                    .fill(k.c.page)
-                    .child(tab_strip(s, k))
-                    .child(external_change_bar(s, k))
-                    .child(find_bar(s, k))
-                    .child(hover_bar(s, k))
-                    .child(editor_area(s, k, cx))
-                    .child(build_panel(s, k)),
-            ),
-    );
-
-    let body = col()
-        .w_full()
-        .h_full()
-        .fill(k.c.bg_deep)
-        .child(main)
-        .child(
-            col()
-                .w_full()
-                .padding(CARD_GAP)
-                .child(
-                    col()
-                        .w_full()
-                        .radius(8.0)
-                        .clip_rounded(8.0)
-                        .border(1.0, k.c.border_base)
-                        .fill(k.c.bg_base)
-                        .child(status_bar(s, k)),
-                ),
-        );
-
-    // An invisible run of characters in the editor's font, measured from the
-    // previous layout to find the width of one character.
-    let body = body.child(
-        text("M".repeat(64))
-            .key("ruler")
-            .font(crate::theme::mono_style(s.settings.font_size))
-            .h(0.0)
-            .opacity(0.001),
-    );
-
-    palette(s, k, &mut overlays);
-    dialogs(s, k, &mut overlays);
-
-    // A focused text field takes a paste itself; when none does, a terminal
-    // is the thing that should receive it.
-    root(body, overlays).on_paste(|s: &mut Workspace, text: &str, _tx: &mut Tx| {
-        if let Some(terminal) = s.active_terminal_mut() {
-            terminal.write(text);
-        }
-    })
-}
-
-fn sidebar(s: &Workspace, k: &Kit) -> El {
-    let mut activity = col().w(SIDEBAR_RAIL_WIDTH).h_full().fill(k.c.bg_deep);
-    for (glyph, mode, name) in [
-        (&crate::icons::FILES, SidebarMode::Files, "Files"),
-        (&crate::icons::SEARCH, SidebarMode::Search, "Search"),
-        (&crate::icons::PROBLEMS, SidebarMode::Problems, "Problems"),
-        (&crate::icons::PLACES, SidebarMode::Places, "Places"),
-    ] {
-        activity = activity.child(activity_item(glyph, name, mode, s.sidebar == mode, k));
-    }
-
-    // The rail stays when the panel is collapsed, so there is always a
-    // visible way back. Clicking a mode also reopens the panel.
-    let (glyph, label) = if s.settings.show_sidebar {
-        (&crate::icons::CHEVRON_LEFT, "Collapse sidebar")
-    } else {
-        (&crate::icons::CHEVRON_RIGHT, "Expand sidebar")
-    };
-    activity = activity.child(el().grow(1.0)).child(
-        row().w_full().h(38.0).px(4.0).center_y().child(
-            col()
-                .key("sidebar-toggle")
-                .label(label)
-                .grow(1.0)
-                .h(32.0)
-                .radius(6.0)
-                .center()
-                .child(icon(glyph, 16.0).color(k.c.text_weak))
-                .hover(k.c.surface_base)
-                .on_press(|s: &mut Workspace| s.toggle_sidebar()),
-        ),
-    );
-
-    let body = match s.sidebar {
-        SidebarMode::Files => file_tree(s, k),
-        SidebarMode::Search => search_panel(s, k),
-        SidebarMode::Problems => problems_panel(s, k),
-        SidebarMode::Places => places_panel(s, k),
-    };
-    let title = match s.sidebar {
-        SidebarMode::Files => "Explorer",
-        SidebarMode::Search => "Search",
-        SidebarMode::Problems => "Problems",
-        SidebarMode::Places => "Places",
-    };
-
-    let panel = col()
-        .w((s.settings.sidebar_width - SIDEBAR_RAIL_WIDTH - CARD_GAP * 2.0).max(120.0))
-        .grow(1.0)
-        .min_h(0.0)
-        .radius(8.0)
-        .clip_rounded(8.0)
-        .border(1.0, k.c.border_base)
-        .fill(k.c.bg_base)
-        .child(
-            row().w_full().h(32.0).px(12.0).center_y().child(
-                text(title.to_string())
-                    .font(k.ty.small_medium)
-                    .color(k.c.text_muted),
-            ),
-        )
-        .child(body);
-
-    row()
-        .h_full()
-        .child(activity)
-        .child(col().padding(CARD_GAP).h_full().child(panel))
-}
-
-/// The draggable edge between the sidebar and the editor.
-fn sidebar_resizer(k: &Kit) -> El {
-    col()
-        .key("sidebar-resizer")
-        .label("Resize sidebar")
-        .w(5.0)
-        .h_full()
-        .center()
-        .fill(k.c.bg_deep)
-        .cursor(rune::Cursor::ResizeColumn)
-        .hit()
-        .hover(k.c.surface_hover)
-        .child(
-            el()
-                .w(2.0)
-                .h(36.0)
-                .radius(1.0)
-                .fill(k.c.border_strong),
-        )
-        .on_drag(|s: &mut Workspace, drag: &mut rune::Drag, _tx: &mut rune::Tx| {
-            if drag.phase == rune::Phase::Up {
-                // The release point is relative to the capture origin and is
-                // not the last Move position; do not apply it.
-                s.sidebar_drag_start = None;
-                s.settings.save();
-                return;
-            }
-            if s.sidebar_drag_start.is_none() {
-                s.sidebar_drag_start = Some(s.settings.sidebar_width);
-            }
-            if let Some(start) = s.sidebar_drag_start {
-                s.settings.sidebar_width =
-                    clamp_sidebar_width(start + drag.x - drag.start_x);
-            }
-        })
-}
-
-/// One entry of the narrow activity bar down the left edge.
-fn activity_item(glyph: &'static rune::Icon, label: &str, mode: SidebarMode, active: bool, k: &Kit) -> El {
-    row()
-        .key(format!("activity-{label}"))
-        .label(label)
-        .w_full()
-        .h(38.0)
-        .px(4.0)
-        .center_y()
-        .child(
-            el()
-                .w(2.0)
-                .h(20.0)
-                .radius(1.0)
-                .fill(if active {
-                    k.c.text_accent
-                } else {
-                    k.c.text_accent.alpha(0.0)
-                }),
-        )
-        .child(
-            col()
-                .grow(1.0)
-                .h(32.0)
-                .radius(6.0)
-                .center()
-                .hover(k.c.surface_base)
-                .on_press(move |s: &mut Workspace| {
-                    s.sidebar = mode;
-                    s.settings.show_sidebar = true;
-                })
-                .child(icon(glyph, 18.0).color(if active {
-                    k.c.text_base
-                } else {
-                    k.c.text_weak
-                })),
-        )
-}
-
-fn places_panel(s: &Workspace, k: &Kit) -> El {
-    let mut list = col().w_full().gap(1.0);
-
-    if s.references.is_empty() {
-        list = list.child(empty_note(
-            "No references. Put the cursor on a symbol and use Go to references.",
-            k,
-        ));
-    }
-
-    for (path, line, column) in s.references.iter().take(300) {
-        let name = path
-            .strip_prefix(s.root.as_deref().unwrap_or(std::path::Path::new("")))
-            .unwrap_or(path)
-            .display()
-            .to_string();
-        let path = path.clone();
-        let line = *line;
-        let column = *column;
-
-        list = list.child(
-            row()
-                .key(format!("place-{name}-{line}-{column}"))
-                .w_full()
-                .px(8.0)
-                .py(3.0)
-                .radius(5.0)
-                .hover(k.c.hover)
-                .on_press(move |s: &mut Workspace| {
-                    s.open_match(path.clone(), line, column);
-                })
-                .child(
-                    text(format!("{name}:{line}"))
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_accent)
-                        .min_w(0.0)
-                        .truncate(),
-                ),
-        );
-    }
-
-    col()
-        .key("places")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .px(4.0)
-        .child(list)
-}
-
-fn problems_panel(s: &Workspace, k: &Kit) -> El {
-    let all = s.servers.all_diagnostics();
-    let mut list = col().w_full().gap(1.0);
-
-    if all.is_empty() {
-        list = list.child(empty_note("No problems reported", k));
-    }
-
-    for diagnostic in all.iter().take(300) {
-        let (colour, label) = match diagnostic.severity {
-            lide_lsp::Severity::Error => (k.c.danger.fg, "error"),
-            lide_lsp::Severity::Warning => (k.c.warning.fg, "warning"),
-            lide_lsp::Severity::Information => (k.c.text_accent, "info"),
-            lide_lsp::Severity::Hint => (k.c.text_weak, "hint"),
-        };
-        let name = diagnostic
-            .path
-            .strip_prefix(s.root.as_deref().unwrap_or(std::path::Path::new("")))
-            .unwrap_or(&diagnostic.path)
-            .display()
-            .to_string();
-        let path = diagnostic.path.clone();
-        let line = diagnostic.start.line + 1;
-        let column = diagnostic.start.character as usize;
-
-        list = list.child(
-            col()
-                .key(format!(
-                    "problem-{name}-{line}-{}",
-                    diagnostic.start.character
-                ))
-                .w_full()
-                .px(8.0)
-                .py(3.0)
-                .radius(5.0)
-                .gap(1.0)
-                .hover(k.c.hover)
-                .on_press(move |s: &mut Workspace| {
-                    s.open_match(path.clone(), line, column);
-                })
-                .child(
-                    text(format!("{name}:{line}  {label}"))
-                        .font(k.ty.small_medium)
-                        .color(colour)
-                        .w_full()
-                        .min_w(0.0)
-                        .truncate(),
-                )
-                .child(
-                    text(diagnostic.message.clone())
-                        .font(k.ty.text_xsmall)
-                        .color(k.c.text_muted)
-                        .w_full(),
-                ),
-        );
-    }
-
-    col()
-        .key("problems")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .px(4.0)
-        .child(list)
-}
-
-fn file_tree(s: &Workspace, k: &Kit) -> El {
-    let active = s
-        .active_document()
-        .and_then(|document| document.path())
-        .map(|path| path.to_path_buf());
-    let mut tree = col().w_full().gap(0.0);
-    if s.root.is_none() {
-        tree = tree.child(empty_note("No folder open", k));
-    }
-    for node in s.tree.nodes() {
-        tree = tree.child(node_row(node, k, 0, active.as_deref(), s.collapsed_paths.clone()));
-    }
-
-    col()
-        .key("file-tree")
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .px(4.0)
-        .py(2.0)
-        .gap(0.0)
-        .child(tree)
-}
-
-fn search_panel(s: &Workspace, k: &Kit) -> El {
-    let mut results = col().w_full().gap(1.0);
-
-    match &s.search {
-        None => {
-            results = results.child(empty_note("Type to search the workspace", k));
-        }
-        Some(search) => {
-            if let Some(error) = &search.error {
-                results = results.child(text(error.clone()).font(k.ty.small).color(k.c.danger.fg));
-            }
-            for found in search.matches.iter().take(300) {
-                let name = found
-                    .path
-                    .strip_prefix(s.root.as_deref().unwrap_or(std::path::Path::new("")))
-                    .unwrap_or(&found.path)
-                    .display()
-                    .to_string();
-                let path = found.path.clone();
-                let line = found.line;
-                let column = found.ranges.first().map(|range| range.start).unwrap_or(0);
-
-                results = results.child(
-                    col()
-                        .key(format!("match-{name}-{line}-{column}"))
-                        .w_full()
-                        .px(8.0)
-                        .py(3.0)
-                        .radius(5.0)
-                        .gap(1.0)
-                        .hover(k.c.hover)
-                        .on_press(move |s: &mut Workspace| {
-                            s.open_match(path.clone(), line, column);
-                        })
-                        .child(
-                            text(format!("{name}:{line}"))
-                                .font(k.ty.small_medium)
-                                .color(k.c.text_accent)
-                                .w_full()
-                                .min_w(0.0)
-                                .truncate(),
-                        )
-                        .child(
-                            text(squash_whitespace(&found.text))
-                                .font(k.ty.text_xsmall)
-                                .color(k.c.text_muted)
-                                .w_full()
-                                .min_w(0.0)
-                                .truncate(),
-                        ),
-                );
-            }
-        }
-    }
-
-    let summary = match &s.search {
-        None => String::new(),
-        Some(search) if search.running => format!("{} matches so far…", search.matches.len()),
-        Some(search) => format!(
-            "{} matches in {} files",
-            search.matches.len(),
-            search.file_count()
-        ),
-    };
-
-    col()
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .gap(8.0)
-        .child(
-            col()
-                .w_full()
-                .px(8.0)
-                .gap(6.0)
-                .child(
-                    TextInput::new(&s.search_query)
-                        .placeholder("Search")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| &mut s.search_query)
-                        .on_change(|s: &mut Workspace, _| s.run_search())
-                        .build(k),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(4.0)
-                        .center_y()
-                        .child(
-                            toggle_chip("Regex", ".*", s.search_regex, k).on_press(
-                                |s: &mut Workspace| {
-                                    s.search_regex = !s.search_regex;
-                                    s.run_search();
-                                },
-                            ),
-                        )
-                        .child(
-                            toggle_chip("Match case", "Aa", s.search_case_sensitive, k).on_press(
-                                |s: &mut Workspace| {
-                                    s.search_case_sensitive = !s.search_case_sensitive;
-                                    s.run_search();
-                                },
-                            ),
-                        )
-                        .child(el().grow(1.0))
-                        .child(
-                            text(summary)
-                                .font(k.ty.small)
-                                .color(k.c.text_weak)
-                                .min_w(0.0)
-                                .truncate(),
-                        ),
-                ),
-        )
-        .child(
-            row()
-                .w_full()
-                .px(8.0)
-                .gap(6.0)
-                .center_y()
-                .child(
-                    col().grow(1.0).min_w(0.0).child(
-                        TextInput::new(&s.search_replacement)
-                            .placeholder("Replace with")
-                            .width(None)
-                            .on_edit(|s: &mut Workspace| &mut s.search_replacement)
-                            .build(k),
-                    ),
-                )
-                .child(
-                    Button::new("All")
-                        .help("Replace all matches")
-                        .on_press(|s: &mut Workspace| s.begin_replace_all())
-                        .build(k),
-                ),
-        )
-        .child(
-            col()
-                .key("search-results")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .px(4.0)
-                .child(results),
-        )
-}
-
-/// A muted line a panel shows when it has nothing to list.
-fn empty_note(message: &str, k: &Kit) -> El {
-    text(message.to_string())
-        .font(k.ty.text_xsmall)
-        .color(k.c.text_weak)
-        .w_full()
-        .px(8.0)
-        .py(6.0)
-}
-
-/// A square icon button for a panel's toolbar.
-fn icon_button(glyph: &'static rune::Icon, label: &str, k: &Kit) -> El {
-    col()
-        .key(format!("icon-button-{label}"))
-        .label(label)
-        .help(label)
-        .size(22.0, 22.0)
-        .radius(5.0)
-        .center()
-        .hover(k.c.surface_base)
-        .child(icon(glyph, 14.0).color(k.c.text_weak))
-}
-
-/// A small on/off switch beside a search box: a bordered chip when on.
-fn toggle_chip(label: &str, face: &str, on: bool, k: &Kit) -> El {
-    row()
-        .key(format!("toggle-{label}"))
-        .label(label)
-        .h(22.0)
-        .px(6.0)
-        .center_y()
-        .radius(5.0)
-        .border(
-            1.0,
-            if on {
-                k.c.text_accent.alpha(0.6)
-            } else {
-                k.c.border_base.alpha(0.0)
-            },
-        )
-        .fill(if on {
-            k.c.text_accent.alpha(0.14)
-        } else {
-            k.c.bg_base
-        })
-        .hover(if on { k.c.text_accent.alpha(0.2) } else { k.c.hover })
-        .child(
-            text(face.to_string())
-                .font(k.ty.small_medium)
-                .color(if on { k.c.text_accent } else { k.c.text_weak }),
-        )
-}
-
-/// A line of source collapsed to one tidy line: tabs and runs of spaces become
-/// a single space and the indentation goes, so a result reads as a snippet.
-fn squash_whitespace(line: &str) -> String {
-    line.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn node_row(
-    node: &TreeNode,
-    k: &Kit,
-    depth: usize,
-    active: Option<&Path>,
-    collapsed: std::collections::HashSet<PathBuf>,
-) -> El {
-    let expanded = !collapsed.contains(&node.path);
-    let current = !node.is_dir && active == Some(node.path.as_path());
-    let name_colour = if current || node.is_dir {
-        k.c.text_base
-    } else {
-        k.c.text_muted
-    };
-
-    // Every row has the same three columns (chevron, icon, name), so a file
-    // lines up with the folders beside it and the indent is the only thing
-    // that varies with depth.
-    let chevron = if node.is_dir {
-        icon(
-            if expanded {
-                &crate::icons::CHEVRON_DOWN
-            } else {
-                &crate::icons::CHEVRON_RIGHT
-            },
-            14.0,
-        )
-        .color(k.c.text_weak)
-    } else {
-        el().size(14.0, 14.0)
-    };
-    let kind: &'static rune::Icon = if node.is_dir {
-        if expanded {
-            &crate::icons::FOLDER_OPEN
-        } else {
-            &crate::icons::FOLDER
-        }
-    } else {
-        crate::icons::for_file(&node.name)
-    };
-
-    let mut row = row()
-        .key(format!("node-{}", node.path.display()))
-        .w_full()
-        .h(24.0)
-        .pl(4.0 + depth as f32 * 12.0)
-        .pr(6.0)
-        .gap(4.0)
-        .center_y()
-        .radius(5.0)
-        .child(chevron)
-        .child(icon(kind, 14.0).color(if current {
-            k.c.text_accent
-        } else {
-            k.c.text_weak
-        }))
-        .child(
-            text(node.name.clone())
-                .font(k.ty.text_xsmall)
-                .color(name_colour)
-                .grow(1.0)
-                .min_w(0.0)
-                .truncate(),
-        );
-
-    if current {
-        row = row.fill(k.c.surface_base);
-    }
-
-    let path = node.path.clone();
-    if node.is_dir {
-        row = row.on_press(move |s: &mut Workspace| s.toggle_directory(&path));
-    } else {
-        row = row.on_press(move |s: &mut Workspace| {
-            if let Err(error) = s.open_path(&path) {
-                s.set_notice(error);
-            }
-        });
-    }
-    row = row.hover(k.c.hover);
-
-    let mut out = col().w_full().child(row);
-    if node.is_dir && expanded {
-        for child in &node.children {
-            out = out.child(node_row(child, k, depth + 1, active, collapsed.clone()));
-        }
-    }
-    out
-}
-
-fn tab_strip(s: &Workspace, k: &Kit) -> El {
-    let mut strip = row()
-        .w_full()
-        .h(33.0)
-        .px(4.0)
-        .pt(3.0)
-        .gap(2.0)
-        .items_end()
-        .fill(k.c.bg_base);
-
-    if s.documents.is_empty() {
-        return col()
-            .child(strip)
-            .child(el().w_full().h(1.0).fill(k.c.border_base));
-    }
-
-    for (index, document) in s.documents.iter().enumerate() {
-        let in_primary = index == s.active;
-        let in_secondary = s.split_document == Some(index);
-        let active = if s.split_document.is_some() && s.focused_pane == 1 {
-            in_secondary
-        } else {
-            in_primary
-        };
-        let dirty = document.is_dirty();
-        let title = document.title();
-
-        let mut content = row().grow(1.0).pl(10.0).pr(4.0).gap(6.0).center_y().child(
-            text(title.clone())
-                .font(k.ty.text_xsmall)
-                .truncate()
-                .min_w(0.0)
-                .color(if active {
-                    k.c.text_base
-                } else {
-                    k.c.text_muted
-                }),
-        );
-
-        if dirty {
-            content = content.child(el().size(6.0, 6.0).radius(3.0).fill(k.c.text_accent));
-        }
-
-        let tab = col()
-            .key(format!("tab-{index}"))
-            .h(29.0)
-            .max_w(200.0)
-            .shrink()
-            .radius(6.0)
-            .border(1.0, if active { k.c.border_base } else { k.c.border_base.alpha(0.0) })
-            .fill(if active { k.c.page } else { k.c.bg_base })
-            .child(
-                content.child(
-                    col()
-                        .key(format!("tab-close-{index}"))
-                        .label(format!("Close {title}"))
-                        .size(18.0, 18.0)
-                        .radius(4.0)
-                        .center()
-                        .hover(k.c.surface_base)
-                        .child(icon(&crate::icons::X, 12.0).color(if active {
-                            k.c.text_muted
-                        } else {
-                            k.c.text_faint
-                        }))
-                        .on_press(move |s: &mut Workspace| s.request_close(index)),
-                ),
-            )
-            .on_press(move |s: &mut Workspace| s.select_tab(index))
-            .on_middle_press(move |s: &mut Workspace, _tx: &mut Tx| s.request_close(index))
-            .hover(k.c.hover);
-
-        strip = strip.child(tab);
-    }
-
-    if s.split_document.is_some() {
-        strip = strip.child(el().grow(1.0)).child(
-            Button::new(if s.focused_pane == 0 {
-                "Left pane"
-            } else {
-                "Right pane"
-            })
-            .control_size(ControlSize::Mini)
-            .help("Tabs open in this pane; click to switch")
-            .on_press(|s: &mut Workspace| s.focus_other_pane())
-            .build(k)
-            .key("focus-pane"),
-        );
-    }
-
-    col()
-        .child(strip)
-        .child(el().w_full().h(1.0).fill(k.c.border_base))
-}
-
-/// A banner for the active document when it changed on disk.
-fn external_change_bar(s: &Workspace, k: &Kit) -> El {
-    let Some(active) = s.active_document() else {
-        return el().h(0.0);
-    };
-    let Some(path) = active.path() else {
-        return el().h(0.0);
-    };
-    if !s.changed_on_disk.iter().any(|changed| changed == path) {
-        return el().h(0.0);
-    }
-
-    row()
-        .w_full()
-        .h(32.0)
-        .px(10.0)
-        .gap(10.0)
-        .center_y()
-        .fill(k.c.warning.bg)
-        .child(
-            text("This file changed on disk.")
-                .font(k.ty.small)
-                .color(k.c.warning.fg),
-        )
-        .child(
-            Button::new("Reload")
-                .on_press(|s: &mut Workspace| s.accept_external_change())
-                .build(k),
-        )
-        .child(
-            Button::new("Keep mine")
-                .on_press(|s: &mut Workspace| s.keep_local_change())
-                .build(k),
-        )
-}
-
-/// What the language server says is under the cursor.
-fn hover_bar(s: &Workspace, k: &Kit) -> El {
-    let Some(hover) = &s.hover else {
-        return el().h(0.0);
-    };
-    row()
-        .w_full()
-        .px(10.0)
-        .py(6.0)
-        .gap(8.0)
-        .fill(k.c.layer_01)
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .child(text(hover.clone()).font(k.ty.small).color(k.c.text_base)),
-        )
-        .child(
-            text("Esc")
-                .font(k.ty.small)
-                .color(k.c.text_weak)
-                .on_press(|s: &mut Workspace| s.hover = None),
-        )
-}
-
-fn find_bar(s: &Workspace, k: &Kit) -> El {
-    if !s.find.open {
-        return el().h(0.0);
-    }
-
-    let count = if s.find.query_text().is_empty() {
-        String::new()
-    } else if s.find.is_empty() {
-        "No results".to_string()
-    } else {
-        format!("{} of {}", s.find.current + 1, s.find.len())
-    };
-
-    let mut bar = row()
-        .w_full()
-        .h(40.0)
-        .px(10.0)
-        .gap(6.0)
-        .center_y()
-        .fill(k.c.bg_base)
-        .child(
-            col().w(240.0).child(
-                TextInput::new(&s.find.query)
-                    .placeholder("Find")
-                    .width(None)
-                    .on_edit(|s: &mut Workspace| &mut s.find.query)
-                    .build(k)
-                    .key("find-query"),
-            ),
-        )
-        .child(
-            text(count)
-                .font(k.ty.small)
-                .color(k.c.text_weak)
-                .w(60.0)
-                .pl(4.0),
-        )
-        .child(icon_button(&crate::icons::ARROW_UP, "Previous match", k).on_press(
-            |s: &mut Workspace| s.find.previous(),
-        ))
-        .child(icon_button(&crate::icons::ARROW_DOWN, "Next match", k).on_press(
-            |s: &mut Workspace| s.find.next(),
-        ));
-
-    if s.find.replacing {
-        bar = bar
-            .child(el().w(1.0).h(16.0).fill(k.c.border_base).mx(4.0))
-            .child(
-                col().w(200.0).child(
-                    TextInput::new(&s.find.replacement)
-                        .placeholder("Replace")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| &mut s.find.replacement)
-                        .build(k),
-                ),
-            )
-            .child(
-                Button::new("Replace")
-                    .control_size(ControlSize::Mini)
-                    .on_press(|s: &mut Workspace| s.replace_current())
-                    .build(k),
-            )
-            .child(
-                Button::new("All")
-                    .control_size(ControlSize::Mini)
-                    .help("Replace all matches")
-                    .on_press(|s: &mut Workspace| s.replace_all())
-                    .build(k),
-            );
-    }
-
-    bar.child(el().grow(1.0)).child(
-        icon_button(&crate::icons::X, "Close find", k)
-            .on_press(|s: &mut Workspace| s.find.close()),
-    )
-}
-
-fn editor_area(s: &Workspace, k: &Kit, cx: &mut Cx<Workspace>) -> El {
-    let Some(document) = s.active_document() else {
-        return col()
-            .grow(1.0)
-            .min_h(0.0)
-            .center()
-            .fill(k.c.page)
-            .child(
-                col()
-                    .gap(14.0)
-                    .center()
-                    .child(
-                        text("Open a file to start editing")
-                            .font(k.ty.ui_medium)
-                            .color(k.c.text_muted),
-                    )
-                    .child(
-                        col()
-                            .gap(8.0)
-                            .child(hint_row("Command palette", "Ctrl+Shift+P", k))
-                            .child(hint_row("Terminal", "Ctrl+`", k)),
-                    ),
-            );
-    };
-
-    let advance = char_advance(s, cx);
-    let primary = document_view(document, s, k, 0, advance);
-
-    let Some(secondary) = s.split_document.and_then(|index| s.documents.get(index)) else {
-        return primary;
-    };
-
-    let focus_border = |focused: bool| {
-        if focused {
-            [2.0, 0.0, 0.0, 0.0]
-        } else {
-            [0.0; 4]
-        }
-    };
-
-    row()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(
-            col()
-                .w(0.5)
-                .grow(1.0)
-                .min_w(0.0)
-                .border_sides(focus_border(s.focused_pane == 0), k.c.text_accent)
-                .child(primary),
-        )
-        .child(el().w(1.0).h_full().fill(k.c.border_base))
-        .child(
-            col()
-                .w(0.5)
-                .grow(1.0)
-                .min_w(0.0)
-                .border_sides(focus_border(s.focused_pane == 1), k.c.text_accent)
-                .child(document_view(secondary, s, k, 1, advance)),
-        )
-}
-
-/// The PDF in `pane`, for the viewer's handlers.
-/// One line of the empty state: what a shortcut does, and the shortcut as a key cap.
-fn hint_row(action: &str, shortcut: &str, k: &Kit) -> El {
-    row()
-        .w(260.0)
-        .gap(12.0)
-        .center_y()
-        .child(
-            text(action.to_string())
-                .font(k.ty.text_xsmall)
-                .color(k.c.text_weak)
-                .grow(1.0),
-        )
-        .child(
-            text(shortcut.to_string())
-                .font(k.ty.small)
-                .color(k.c.text_muted)
-                .px(6.0)
-                .py(2.0)
-                .radius(4.0)
-                .border(1.0, k.c.border_base)
-                .fill(k.c.bg_base),
-        )
-}
-
-fn pdf_at(s: &mut Workspace, pane: usize) -> &mut PdfView {
-    let index = if pane == 0 {
-        s.active
-    } else {
-        s.split_document.unwrap_or(s.active)
-    };
-    match s.documents.get_mut(index) {
-        Some(Document::Pdf(pdf)) => pdf,
-        _ => unreachable!("the pane shows a PDF"),
-    }
-}
-
-fn document_view(document: &Document, s: &Workspace, k: &Kit, pane: usize, advance: f32) -> El {
-    let view = match document {
-        Document::Text(editor) => editor_view(editor, s, k, pane, advance),
-        Document::Markdown { editor, .. } => markdown_view(editor, s, k, pane, advance),
-        Document::Pdf(pdf) => pdf.view(k, pane, move |s: &mut Workspace| pdf_at(s, pane)),
-        Document::Terminal(terminal) => terminal_view(terminal, s, k, pane, advance),
-        Document::Image(image) => image.view(k),
-        Document::Diff(diff) => diff.view(k),
-        Document::Csv(csv) => csv.view(k, pane),
-        Document::Notebook(notebook) => notebook.view(k),
-    };
-
-    view
-}
-
-/// Draw a terminal: the grid's rows, with a block at the cursor.
-fn terminal_view(
-    terminal: &lide_terminal::TerminalView,
-    s: &Workspace,
-    k: &Kit,
-    pane: usize,
-    advance: f32,
-) -> El {
-    let advance = advance.max(1.0);
-    let snapshot = terminal.emulator.snapshot();
-    let line_height = s.settings.line_height();
-    let style = crate::theme::mono_style(s.settings.font_size);
-    let mut rows = col().w_full().gap(0.0);
-
-    let selection = terminal.selection.map(|(start, end)| {
-        if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        }
-    });
-
-    for (index, line_text) in snapshot.rows.iter().enumerate() {
-        let is_cursor_row = snapshot.cursor_visible && index == snapshot.cursor.0;
-        let mut line = row().h(line_height).items_center();
-
-        if let Some(((start_row, start_column), (end_row, end_column))) = selection {
-            if index >= start_row && index <= end_row {
-                let chars = line_text.chars().count();
-                let from = if index == start_row {
-                    start_column.min(chars)
-                } else {
-                    0
-                };
-                let to = if index == end_row {
-                    (end_column + 1).min(chars)
-                } else {
-                    chars
-                };
-                if to > from {
-                    line = line.child(
-                        el()
-                            .absolute(from as f32 * advance_for(s), 0.0)
-                            .w((to - from) as f32 * advance_for(s))
-                            .h_full()
-                            .fill(k.c.text_accent.alpha(0.25)),
-                    );
-                }
-            }
-        }
-
-        line = line.child(text(line_text.clone()).font(style).color(k.c.text_base));
-
-        if is_cursor_row {
-            // The block belongs at the cursor's column, not at the end of the
-            // row: an empty line otherwise puts it after the text.
-            line = line.child(
-                el()
-                    .absolute(snapshot.cursor.1 as f32 * advance, line_height * 0.1)
-                    .w(advance)
-                    .h(line_height * 0.8)
-                    .fill(k.c.text_accent)
-                    .opacity(0.5),
-            );
-        }
-        rows = rows.child(line);
-    }
-
-    let area = col()
-        .key("terminal-area")
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec { stick_bottom: true })
-        .hit()
-        .fill(k.c.page)
-        .padding(CARD_GAP)
-        .on_wheel(move |s: &mut Workspace, ev: WheelEvent, _tx: &mut Tx| {
-            if ev.dy == 0.0 {
-                return false;
-            }
-            let line_height = s.settings.line_height().max(1.0);
-            let lines = (-ev.dy / line_height).round() as i32;
-            let lines = if lines == 0 {
-                if ev.dy < 0.0 {
-                    1
-                } else {
-                    -1
-                }
-            } else {
-                lines
-            };
-            let index = if pane == 0 {
-                s.active
-            } else {
-                s.split_document.unwrap_or(s.active)
-            };
-            if let Some(Document::Terminal(terminal)) = s.documents.get_mut(index) {
-                terminal.scroll(lines);
-            }
-            true
-        })
-        .on_drag(
-            move |s: &mut Workspace, drag: &mut rune::Drag, tx: &mut Tx| {
-                let line_height = s.settings.line_height().max(1.0);
-                let advance = advance_for(s).max(1.0);
-                let point = |x: f32, y: f32| {
-                    (
-                        ((y - 6.0).max(0.0) / line_height) as usize,
-                        ((x - 6.0).max(0.0) / advance) as usize,
-                    )
-                };
-                let start = point(drag.start_x, drag.start_y);
-                let end = point(drag.x, drag.y);
-                let index = if pane == 0 {
-                    s.active
-                } else {
-                    s.split_document.unwrap_or(s.active)
-                };
-                if let Some(Document::Terminal(terminal)) = s.documents.get_mut(index) {
-                    terminal.select(start, end);
-                    if drag.phase == rune::Phase::Up {
-                        let text = terminal.selected_text();
-                        if !text.trim().is_empty() {
-                            tx.copy(text);
-                        }
-                    }
-                }
-            },
-        )
-        .child(rows);
-
-    if !s.terminal_find.open {
-        return area;
-    }
-
-    col()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(terminal_find_bar(s, k))
-        .child(area)
-}
-
-/// The terminal's search bar.
-fn terminal_find_bar(s: &Workspace, k: &Kit) -> El {
-    row()
-        .w_full()
-        .h(34.0)
-        .px(8.0)
-        .gap(6.0)
-        .center_y()
-        .fill(k.c.bg_base)
-        .child(
-            text_input(&s.terminal_find.query, k.ty.ui)
-                .key("terminal-find-query")
-                .label("Find in terminal")
-                .on_edit(|s: &mut Workspace| &mut s.terminal_find.query)
-                .on_submit(|s: &mut Workspace, _| s.terminal_find_next())
-                .w(220.0)
-                .px(6.0)
-                .py(3.0)
-                .radius(5.0)
-                .fill(k.c.surface_base),
-        )
-        .child(
-            text(s.terminal_find.message.clone())
-                .font(k.ty.small)
-                .color(k.c.text_weak),
-        )
-        .child(
-            Button::new("Previous")
-                .on_press(|s: &mut Workspace| s.terminal_find_previous())
-                .build(k),
-        )
-        .child(
-            Button::new("Next")
-                .on_press(|s: &mut Workspace| s.terminal_find_next())
-                .build(k),
-        )
-        .child(
-            Button::new("Close")
-                .on_press(|s: &mut Workspace| s.terminal_find.close())
-                .build(k),
-        )
-}
-
-fn advance_for(s: &Workspace) -> f32 {
-    s.settings.font_size * 0.62
-}
-
-/// Whether a file should open as a table rather than as text.
-fn is_table(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("csv") | Some("tsv")
-    )
-}
-
-/// Whether a file has an SVG source.
-fn is_svg(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("svg"))
-        .unwrap_or(false)
-}
-
-/// Whether a file is a Jupyter notebook.
-fn is_notebook(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("ipynb")
-    )
-}
-
-/// Collect the `.tex` files under `directory`, shallowly.
-fn collect_tex(directory: &Path, found: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 3 || found.len() > 32 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            collect_tex(&path, found, depth + 1);
-        } else if path
-            .extension()
-            .map(|extension| extension == "tex")
-            .unwrap_or(false)
-        {
-            found.push(path);
-        }
-    }
-}
-
-/// The project a file belongs to.
-///
-/// Walks up from the file looking for something that marks a project root,
-/// and falls back to the file's own directory.
-pub fn project_root(path: &Path) -> PathBuf {
-    const MARKERS: &[&str] = &[
-        "Cargo.toml",
-        "package.json",
-        "pyproject.toml",
-        "go.mod",
-        "CMakeLists.txt",
-        "Makefile",
-        "pom.xml",
-        "build.gradle",
-        ".git",
-        ".hg",
-    ];
-
-    let mut directory = path.parent();
-    while let Some(current) = directory {
-        if MARKERS.iter().any(|marker| current.join(marker).exists()) {
-            return current.to_path_buf();
-        }
-        directory = current.parent();
-    }
-
-    path.parent()
-        .map(|parent| parent.to_path_buf())
-        .unwrap_or_default()
-}
-
-/// The width of one character of the editor's font, in points.
-///
-/// The view cannot ask the text system directly, so it renders an invisible
-/// run of characters and reads its width back from the previous layout. Until
-/// that has happened once, an estimate from the font size is used; it is
-/// deliberately a little generous, because underestimating would make a long
-/// line wrap and put the gutter out of step.
-fn char_advance(s: &Workspace, cx: &mut Cx<Workspace>) -> f32 {
-    const CELLS: f32 = 64.0;
-    cx.layout_with("ruler", |rect| rect[2])
-        .map(|width| width / CELLS)
-        .filter(|advance| *advance > 1.0)
-        .unwrap_or(s.settings.font_size * 0.62)
-}
-
-/// The line numbers, one per line, right-aligned by padding with spaces.
-///
-/// A monospace font makes the padding work, and one text element with as many
-/// lines as the document is far cheaper than one element per number.
-fn gutter_text(lines: usize, _advance: f32) -> String {
-    let digits = lines.to_string().len();
-    let mut out = String::new();
-    for line in 1..=lines {
-        out.push_str(&format!("{line:>digits$}\n"));
-    }
-    out
-}
-
-/// The coloured spans for a document, in the editor's current theme.
-///
-/// The highlighter caches its output per language and source text, so a frame
-/// that draws unchanged text highlights nothing.
-fn syntax_spans(editor: &Editor, s: &Workspace, k: &Kit) -> Vec<rune::Span> {
-    let mut spans = match editor
-        .location
-        .as_ref()
-        .map(lide_resource::Location::path_for_kind)
-        .and_then(|path| lang_for_path(&path.to_string_lossy()))
-    {
-        Some(language) => {
-            let found = highlight(Some(language), editor.text());
-            SyntaxTheme::from_kit(k).spans(&found, 0)
-        }
-        None => Vec::new(),
-    };
-
-    if let Some(path) = editor
-        .location
-        .as_ref()
-        .map(lide_resource::Location::path_for_kind)
-    {
-        let diagnostics = s.servers.diagnostics_for(path);
-        spans.extend(diagnostic_spans(editor.text(), path, diagnostics, k));
-    }
-    spans
-}
-
-/// The underlines for the diagnostics a server reported for `path`.
-///
-/// A server's columns are UTF-16 units, so they go through [`offset_of`]
-/// rather than being used as byte offsets. A zero-length range underlines the
-/// character it starts at, which is what a server means by "here".
-fn diagnostic_spans(
-    text: &str,
-    path: &Path,
-    diagnostics: &[lide_lsp::Diagnostic],
-    k: &Kit,
-) -> Vec<rune::Span> {
-    let mut spans = Vec::new();
-    for diagnostic in diagnostics {
-        if diagnostic.path != path {
-            continue;
-        }
-        let start = offset_of(text, diagnostic.start.line, diagnostic.start.character);
-        if start >= text.len() {
-            continue;
-        }
-        let end = offset_of(text, diagnostic.end.line, diagnostic.end.character);
-        let end = if end > start {
-            end.min(text.len())
-        } else {
-            text[start..]
-                .chars()
-                .next()
-                .map(|ch| start + ch.len_utf8())
-                .unwrap_or(start)
-        };
-        if end <= start {
-            continue;
-        }
-        let color = match diagnostic.severity {
-            lide_lsp::Severity::Error => k.c.danger.fg,
-            lide_lsp::Severity::Warning => k.c.warning.fg,
-            lide_lsp::Severity::Information | lide_lsp::Severity::Hint => k.c.text_accent,
-        };
-        spans.push(rune::Span::new(start, end).underline(color));
-    }
-    spans
-}
-
-fn editor_view(editor: &Editor, s: &Workspace, k: &Kit, pane: usize, advance: f32) -> El {
-    let font_size = s.settings.font_size;
-    let style = crate::theme::mono_style(font_size);
-    let spans = syntax_spans(editor, s, k);
-
-    let field = text_input(&editor.edit, style)
-        .spans(spans)
-        .key(format!("editor-{pane}"))
-        .on_edit(move |s: &mut Workspace| {
-            let index = if pane == 0 {
-                s.active
-            } else {
-                s.split_document.unwrap_or(s.active)
-            };
-            &mut s.documents[index]
-                .editor_mut()
-                .expect("the pane shows a text document")
-                .edit
-        })
-        .on_submit(move |s: &mut Workspace, _| {
-            let index = if pane == 0 {
-                s.active
-            } else {
-                s.split_document.unwrap_or(s.active)
-            };
-            if let Some(editor) = s.documents[index].editor_mut() {
-                editor.edit.insert("\n");
-            }
-        })
-        .py(8.0)
-        .color(k.c.text_base);
-
-    let completion = if s.completion_open {
-        Some(completion_list(s, k, pane, advance))
-    } else if s.code_actions_open {
-        Some(code_action_list(s, k, pane, advance))
-    } else {
-        None
-    };
-
-    let body = if s.settings.line_numbers {
-        let lines = editor.line_count();
-        let longest = editor
-            .text()
-            .lines()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0);
-        // The field is made wide enough for its longest line so that nothing
-        // wraps: a wrapped line would take two rows in the text and one in
-        // the gutter.
-        let padding = 24.0;
-        let field_width = ((longest as f32) * advance + padding + 14.0).max(120.0);
-        let digits = lines.to_string().len();
-        // Padding is added outside the width, so this is the digits alone.
-        let gutter_width = digits as f32 * advance + 2.0;
-
-        let gutter = text(gutter_text(lines, advance))
-            .key("gutter")
-            .font(style)
-            .color(k.c.text_faint)
-            .w(gutter_width)
-            .shrink()
-            .pl(14.0)
-            .pr(12.0)
-            .py(8.0);
-
-        row()
-            .items_start()
-            .child(gutter)
-            .child(el().w(1.0).h_full().fill(k.c.border_base))
-            .child(field.w(field_width).pl(14.0))
-    } else {
-        row().items_start().child(field.w_full().min_w(0.0))
-    };
-
-    col()
-        .key(format!("editor-scroll-{pane}"))
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll_xy()
-        .fill(k.c.page)
-        .child(body)
-        .children(completion)
-}
-
-/// The code actions the server offered, at the caret.
-fn code_action_list(s: &Workspace, k: &Kit, pane: usize, advance: f32) -> El {
-    let Some(editor) = s.active_document().and_then(|document| document.editor()) else {
-        return el();
-    };
-    let line = editor.edit.line_of_byte(editor.edit.focus);
-    let line_start = editor.edit.line_range(line).start;
-    let column = editor
-        .edit
-        .text
-        .get(line_start..editor.edit.focus)
-        .map(|text| text.chars().count())
-        .unwrap_or(0);
-
-    let line_height = s.settings.line_height();
-    let gutter = if s.settings.line_numbers {
-        let digits = editor.line_count().to_string().len();
-        digits as f32 * advance + 16.0
-    } else {
-        0.0
-    };
-    let x = gutter + 12.0 + column as f32 * advance;
-    let y = 8.0 + (line as f32 + 1.0) * line_height;
-
-    let mut list = col().w_full().gap(1.0);
-    for (index, action) in s.code_actions.iter().take(10).enumerate() {
-        list = list.child(
-            row()
-                .key(format!("action-{index}"))
-                .w_full()
-                .px(8.0)
-                .py(3.0)
-                .radius(3.0)
-                .fill(k.c.layer_01)
-                .hover(k.c.surface_hover)
-                .on_press(move |s: &mut Workspace| s.apply_code_action(index))
-                .child(
-                    text(action.title.clone())
-                        .font(k.ty.ui_compact)
-                        .color(k.c.text_base),
-                ),
-        );
-    }
-
-    el().key(format!("code-actions-{pane}"))
-        .absolute(x, y)
-        .w(360.0)
-        .radius(6.0)
-        .fill(k.c.layer_02)
-        .border(1.0, k.c.border_base)
-        .padding(4.0)
-        .child(list)
-}
-
-/// The completion list, placed at the caret.
-///
-/// It is a child of the editor's scrolling content rather than an overlay, so
-/// it scrolls with the text and sits on the line the caret is on. Positioning
-/// it exactly needs the caret's rect, which the text field does not publish;
-/// this uses the caret's line and column, which is the same thing as long as
-/// nothing wraps — and nothing wraps, because the field is as wide as its
-/// longest line.
-fn completion_list(s: &Workspace, k: &Kit, pane: usize, advance: f32) -> El {
-    let Some(editor) = s.active_document().and_then(|document| document.editor()) else {
-        return el();
-    };
-    let line = editor.edit.line_of_byte(editor.edit.focus);
-    let line_start = editor.edit.line_range(line).start;
-    let column = editor
-        .edit
-        .text
-        .get(line_start..editor.edit.focus)
-        .map(|text| text.chars().count())
-        .unwrap_or(0);
-
-    let line_height = s.settings.line_height();
-    let gutter = if s.settings.line_numbers {
-        let digits = editor.line_count().to_string().len();
-        digits as f32 * advance + 16.0
-    } else {
-        0.0
-    };
-
-    let x = gutter + 12.0 + column as f32 * advance;
-    let y = 8.0 + (line as f32 + 1.0) * line_height;
-
-    let mut list = col().w_full().gap(1.0);
-    for (index, item) in s.completions.iter().take(10).enumerate() {
-        let selected = index == s.completion_selected;
-        let kind = item.kind_label();
-        let mut row = row()
-            .w_full()
-            .px(8.0)
-            .py(3.0)
-            .gap(8.0)
-            .center_y()
-            .radius(3.0)
-            .fill(if selected {
-                k.c.surface_hover
-            } else {
-                k.c.layer_01
-            })
-            .child(
-                text(item.label.clone())
-                    .font(k.ty.ui_compact)
-                    .color(k.c.text_base)
-                    .grow(1.0),
-            );
-        if !kind.is_empty() {
-            row = row.child(text(kind).font(k.ty.small).color(k.c.text_weak));
-        }
-        if let Some(detail) = &item.detail {
-            row = row.child(text(detail.clone()).font(k.ty.small).color(k.c.text_muted));
-        }
-        list = list.child(row.on_press(move |s: &mut Workspace| {
-            s.completion_selected = index;
-            s.accept_completion();
-        }));
-    }
-
-    el().key(format!("completion-{pane}"))
-        .absolute(x, y)
-        .w(380.0)
-        .radius(6.0)
-        .fill(k.c.layer_02)
-        .border(1.0, k.c.border_base)
-        .padding(4.0)
-        .child(list)
-}
-
-fn markdown_view(editor: &Editor, s: &Workspace, k: &Kit, pane: usize, advance: f32) -> El {
-    let _ = advance;
-    let style = crate::theme::mono_style(s.settings.font_size);
-    let source_scroll = s.markdown_scrolls[pane * 2].clone();
-    let preview_scroll = s.markdown_scrolls[pane * 2 + 1].clone();
-    let outline = &s
-        .active_document()
-        .and_then(|document| match document {
-            Document::Markdown { outline, .. } => Some(outline.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let source = text_input(&editor.edit, style)
-        .spans(syntax_spans(editor, s, k))
-        .key(format!("markdown-source-{pane}"))
-        .on_edit(move |s: &mut Workspace| {
-            let index = if pane == 0 {
-                s.active
-            } else {
-                s.split_document.unwrap_or(s.active)
-            };
-            &mut s.documents[index]
-                .editor_mut()
-                .expect("the pane shows a text document")
-                .edit
-        })
-        .on_submit(move |s: &mut Workspace, _| {
-            let index = if pane == 0 {
-                s.active
-            } else {
-                s.split_document.unwrap_or(s.active)
-            };
-            if let Some(editor) = s.documents[index].editor_mut() {
-                editor.edit.insert("\n");
-            }
-        })
-        .w_full()
-        .px(12.0)
-        .py(8.0)
-        .color(k.c.text_base);
-
-    let preview = Markdown::new(editor.text()).render(&MarkdownStyle::from_kit(k));
-
-    // The outline navigates the source: clicking a heading puts the caret on
-    // the line it is on, which is what makes the preview and the source feel
-    // like one document.
-    let mut outline_pane = col().w(190.0).shrink().gap(1.0).px(6.0).py(8.0).child(
-        text("Outline")
-            .font(k.ty.small_medium)
-            .color(k.c.text_muted)
-            .px(6.0)
-            .pb(4.0),
-    );
-    if outline.is_empty() {
-        outline_pane =
-            outline_pane.child(empty_note("No headings", k));
-    }
-    for (index, entry) in outline.iter().enumerate() {
-        let line = entry.line;
-        outline_pane = outline_pane.child(
-            text(entry.title.clone())
-                .key(format!("outline-{pane}-{index}"))
-                .font(k.ty.text_xsmall)
-                .min_w(0.0)
-                .truncate()
-                .color(if entry.level <= 2 {
-                    k.c.text_base
-                } else {
-                    k.c.text_muted
-                })
-                .w_full()
-                .px(6.0)
-                .py(2.0)
-                .pl(6.0 + 10.0 * entry.level.saturating_sub(1) as f32)
-                .radius(5.0)
-                .hover(k.c.hover)
-                .on_press(move |s: &mut Workspace| {
-                    if let Some(editor) = s.active_editor_mut() {
-                        editor.go_to(line, 0);
-                    }
-                }),
-        );
-    }
-
-    // A split gives each pane half the window; the outline is the first
-    // thing to go so the source and the preview keep a readable width.
-    let outline_pane = if s.split_document.is_some() {
-        el().h(0.0)
-    } else {
-        outline_pane
-    };
-    row()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(outline_pane)
-        .child(if s.split_document.is_some() {
-            el().h(0.0)
-        } else {
-            el().w(1.0).h_full().fill(k.c.border_base)
-        })
-        .child({
-            let live = source_scroll.clone();
-            let reported = live.clone();
-            let other = preview_scroll.clone();
-            let other_key = format!("preview-scroll-{pane}");
-            col()
-                .key(format!("markdown-scroll-{pane}"))
-                .w(0.5)
-                .grow(1.0)
-                .min_w(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .on_scroll_offset(move |at: ScrollPos| {
-                    reported.set([at.offset[1], at.max[1]]);
-                })
-                .on_wheel(move |_s: &mut Workspace, ev: WheelEvent, tx: &mut Tx| {
-                    mirror_scroll(&live, &other, &other_key, ev.dy, tx);
-                    // Leave the native scroll to the pane the pointer is over.
-                    false
-                })
-                .child(source)
-        })
-        .child(el().w(1.0).h_full().fill(k.c.border_base))
-        .child({
-            let live = preview_scroll.clone();
-            let reported = live.clone();
-            let other = source_scroll.clone();
-            let other_key = format!("markdown-scroll-{pane}");
-            col()
-                .key(format!("preview-scroll-{pane}"))
-                .w(0.5)
-                .grow(1.0)
-                .min_w(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .on_scroll_offset(move |at: ScrollPos| {
-                    reported.set([at.offset[1], at.max[1]]);
-                })
-                .on_wheel(move |_s: &mut Workspace, ev: WheelEvent, tx: &mut Tx| {
-                    mirror_scroll(&live, &other, &other_key, ev.dy, tx);
-                    false
-                })
-                .padding(16.0)
-                .child(preview)
-        })
-}
-
-/// Move `other` to the same fraction of its content that `this` will be at
-/// after a wheel of `dy` points, leaving `this` to scroll naturally.
-///
-/// The two panes hold different amounts of content — a wrapped source line is
-/// not a rendered paragraph — so the common measure is the fraction scrolled,
-/// which is what a reader means by "the same place".
-fn mirror_scroll(
-    this: &Live<[f32; 2]>,
-    other: &Live<[f32; 2]>,
-    other_key: &str,
-    dy: f32,
-    tx: &mut Tx,
-) {
-    let [offset, max] = this.get();
-    let [_, other_max] = other.get();
-    if max <= 0.0 || other_max <= 0.0 {
-        return;
-    }
-    // A positive wheel delta moves the content down, towards its start.
-    let projected = (offset - dy).clamp(0.0, max);
-    tx.scroll_to_y(other_key.to_string(), projected / max * other_max);
-}
-
-/// The LaTeX build's output, at the bottom of the editor.
-fn build_panel(s: &Workspace, k: &Kit) -> El {
-    let Some(build) = &s.build else {
-        return el().h(0.0);
-    };
-
-    let (status, colour) = if !build.finished {
-        ("building…".to_string(), k.c.text_accent)
-    } else if build.success {
-        ("build succeeded".to_string(), k.c.success.fg)
-    } else {
-        (
-            format!("build failed, {} errors", build.errors().len()),
-            k.c.danger.fg,
-        )
-    };
-
-    let mut lines = col().w_full().gap(0.0);
-
-    // The errors first, each one a jump to the line that caused it.
-    for error in build.errors().iter().take(8) {
-        let name = error
-            .path
-            .strip_prefix(s.root.as_deref().unwrap_or(std::path::Path::new("")))
-            .unwrap_or(&error.path)
-            .display()
-            .to_string();
-        let path = error.path.clone();
-        let line = error.line;
-        lines = lines.child(
-            row()
-                .key(format!("build-error-{name}-{line}"))
-                .w_full()
-                .gap(8.0)
-                .radius(3.0)
-                .hover(k.c.hover)
-                .on_press(move |s: &mut Workspace| {
-                    s.open_match(path.clone(), line, 0);
-                })
-                .child(
-                    text(format!("{name}:{line}"))
-                        .font(k.ty.small_medium)
-                        .color(k.c.text_accent),
-                )
-                .child(
-                    text(error.message.clone())
-                        .font(k.ty.small)
-                        .color(k.c.text_base)
-                        .grow(1.0),
-                ),
-        );
-    }
-
-    for line in build.tail(8) {
-        lines = lines.child(text(line.clone()).font(k.ty.small).color(k.c.text_muted));
-    }
-
-    col()
-        .key("build-panel")
-        .w_full()
-        .max_h(220.0)
-        .shrink()
-        .fill(k.c.bg_base)
-        .border_sides([1.0, 0.0, 0.0, 0.0], k.c.border_base)
-        .child(
-            row()
-                .w_full()
-                .h(30.0)
-                .pl(12.0)
-                .pr(6.0)
-                .gap(10.0)
-                .center_y()
-                .child(
-                    text(build.options.command_line())
-                        .font(k.ty.small)
-                        .color(k.c.text_weak)
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .truncate(),
-                )
-                .child(text(status).font(k.ty.small_medium).color(colour))
-                .child(
-                    icon_button(&crate::icons::X, "Close build output", k).on_press(
-                        |s: &mut Workspace| {
-                            if let Some(build) = s.build.as_mut() {
-                                build.cancel();
-                            }
-                            s.build = None;
-                        },
-                    ),
-                ),
-        )
-        .child(
-            col()
-                .key("build-output")
-                .w_full()
-                .h(120.0)
-                .scroll(ScrollSpec { stick_bottom: true })
-                .px(12.0)
-                .py(6.0)
-                .child(lines),
-        )
-}
-
-fn status_bar(s: &Workspace, k: &Kit) -> El {
-    let mut left: Vec<(String, bool)> = Vec::new();
-    let mut right: Vec<(String, bool)> = Vec::new();
-
-    if let Some(notice) = &s.notice {
-        left.push((notice.clone(), true));
-    }
-    if let Some(location) = s.active_document().and_then(|document| document.location()) {
-        let path = match location {
-            lide_resource::Location::Local(path) => s
-                .root
-                .as_deref()
-                .and_then(|root| path.strip_prefix(root).ok())
-                .unwrap_or(path)
-                .display()
-                .to_string(),
-            lide_resource::Location::Remote { .. } => location.to_string(),
-        };
-        left.push((short_path(&path), false));
-    }
-    let (errors, warnings) = s.servers.problem_count();
-    if errors > 0 {
-        left.push((format!("{errors} errors"), false));
-    }
-    if warnings > 0 {
-        left.push((format!("{warnings} warnings"), false));
-    }
-
-    match s.active_document() {
-        Some(Document::Text(editor)) => {
-            right.push((language_name(editor), false));
-            right.push((
-                format!(
-                    "Ln {}, Col {}",
-                    editor.cursor_line(),
-                    editor.cursor_column()
-                ),
-                true,
-            ));
-            right.push((format!("{} lines", editor.line_count()), false));
-        }
-        Some(Document::Markdown { editor, .. }) => {
-            right.push(("Markdown".to_string(), false));
-            right.push((
-                format!(
-                    "Ln {}, Col {}",
-                    editor.cursor_line(),
-                    editor.cursor_column()
-                ),
-                true,
-            ));
-        }
-        Some(Document::Pdf(pdf)) => {
-            right.push(("PDF".to_string(), false));
-            right.push((
-                format!("Page {} / {}", pdf.page() + 1, pdf.page_count()),
-                true,
-            ));
-        }
-        Some(Document::Notebook(notebook)) => {
-            right.push(("Notebook".to_string(), false));
-            right.push((format!("{} cells", notebook.notebook.cells.len()), true));
-        }
-        Some(Document::Csv(csv)) => {
-            right.push(("Table".to_string(), false));
-            let (rows, columns) = csv.size();
-            right.push((format!("{rows} x {columns}"), true));
-        }
-        Some(Document::Diff(diff)) => {
-            right.push(("Diff".to_string(), false));
-            let (added, removed) = diff.counts();
-            right.push((format!("+{added} -{removed}"), true));
-        }
-        Some(Document::Image(image)) => {
-            right.push(("Image".to_string(), false));
-            if let Some([width, height]) = image.size() {
-                right.push((format!("{width} x {height}"), true));
-            }
-        }
-        Some(Document::Terminal(terminal)) => {
-            right.push(("Terminal".to_string(), false));
-            right.push((terminal.title(), true));
-            right.push((
-                format!(
-                    "{} x {}",
-                    terminal.emulator.size().cols,
-                    terminal.emulator.size().rows
-                ),
-                false,
-            ));
-        }
-        None => {}
-    }
-
-    if s.find.open && !s.find.is_empty() {
-        right.push((format!("{} matches", s.find.len()), false));
-    }
-    if let Some(status) = s.servers.status() {
-        right.push((status, false));
-    }
-
-    let mut bar = row()
-        .w_full()
-        .h(24.0)
-        .px(10.0)
-        .gap(14.0)
-        .center_y()
-        .fill(k.c.bg_base);
-
-    let item = |label: &String, strong: bool| {
-        text(label.clone())
-            .font(k.ty.small)
-            .color(if strong { k.c.text_base } else { k.c.text_weak })
-    };
-
-    // The sidebar is hidden by default; this is the always-visible way back.
-    let (sidebar_icon, sidebar_label) = if s.settings.show_sidebar {
-        (&crate::icons::CHEVRON_LEFT, "Hide sidebar")
-    } else {
-        (&crate::icons::CHEVRON_RIGHT, "Show sidebar")
-    };
-    bar = bar.child(
-        icon_button(sidebar_icon, sidebar_label, k)
-            .on_press(|s: &mut Workspace| s.toggle_sidebar()),
-    );
-
-    // The branch comes first, as in every editor's status bar: it is what the
-    // whole window is looking at, and it does not move when the file changes.
-    if let Some(git) = &s.git {
-        if !git.branch.is_empty() {
-            bar = bar.child(
-                row()
-                    .gap(4.0)
-                    .center_y()
-                    .child(icon(&crate::icons::BRANCH, 12.0).color(k.c.text_weak))
-                    .child(item(&git.branch, false)),
-            );
-        }
-    }
-
-    // A one-click way between the LaTeX source and its PDF, for people who
-    // do not know the shortcut yet.
-    let sync = match s.documents.get(s.focused_index()) {
-        Some(Document::Pdf(_)) => Some("Source"),
-        Some(document)
-            if document
-                .path()
-                .and_then(|path| path.extension())
-                .is_some_and(|extension| extension == "tex") =>
-        {
-            Some("PDF")
-        }
-        _ => None,
-    };
-    if let Some(label) = sync {
-        bar = bar.child(
-            text(label)
-                .key("sync-pdf")
-                .label("Jump between the LaTeX source and its PDF")
-                .font(k.ty.small_medium)
-                .color(k.c.text_accent)
-                .px(6.0)
-                .py(1.0)
-                .radius(4.0)
-                .hover(k.c.surface_base)
-                .on_press(|s: &mut Workspace| s.sync_source_and_pdf()),
-        );
-    }
-    // The left side may be long (a notice, a path); it is the part that gives.
-    bar = bar.child(
-        row()
-            .grow(1.0)
-            .min_w(0.0)
-            .gap(14.0)
-            .center_y()
-            .children(left.iter().map(|(label, strong)| item(label, *strong).truncate())),
-    );
-    for (label, strong) in &right {
-        bar = bar.child(item(label, *strong));
-    }
-
-    bar
-}
-
-/// A path with its `.` and `..` components resolved lexically, without
-/// touching the file system (so it works for files that do not exist yet).
-fn clean_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !matches!(out.components().next_back(), Some(Component::Normal(_))) || !out.pop()
-                {
-                    out.push("..");
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    if out.as_os_str().is_empty() {
-        out.push(".");
-    }
-    out
-}
-
-/// A path short enough for the status bar.
-fn short_path(path: &str) -> String {
-    const LIMIT: usize = 60;
-    let count = path.chars().count();
-    if count <= LIMIT {
-        return path.to_string();
-    }
-    let start = path
-        .char_indices()
-        .nth(count - LIMIT + 1)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    format!("…{}", &path[start..])
-}
-
-/// The language's name for the status bar, from the file's extension.
-fn language_name(editor: &Editor) -> String {
-    let Some(location) = &editor.location else {
-        return "Plain Text".to_string();
-    };
-    let Some(language) = lang_for_path(&location.path_for_kind().to_string_lossy()) else {
-        return "Plain Text".to_string();
-    };
-    match language {
-        "cpp" => "C++".to_string(),
-        "csharp" => "C#".to_string(),
-        "javascript" => "JavaScript".to_string(),
-        "typescript" => "TypeScript".to_string(),
-        "python" => "Python".to_string(),
-        "rust" => "Rust".to_string(),
-        "toml" => "TOML".to_string(),
-        "yaml" | "yml" => "YAML".to_string(),
-        "json" => "JSON".to_string(),
-        "html" => "HTML".to_string(),
-        "css" => "CSS".to_string(),
-        "markdown" => "Markdown".to_string(),
-        "bash" => "Shell Script".to_string(),
-        other => {
-            let mut chars = other.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => "Plain Text".to_string(),
-            }
-        }
-    }
-}
-
-fn palette(s: &Workspace, k: &Kit, layer: &mut Vec<El>) {
-    if !s.palette.open {
-        return;
-    }
-
-    let items: Vec<ListItem> = s
-        .palette
-        .visible()
-        .into_iter()
-        .map(|entry| {
-            let entry = entry.clone();
-            let label = entry.label();
-            let group = entry.group();
-
-            // A task runs; a command is run. Both close the palette first, so
-            // that a command which opens another dialog is not fighting it.
-            ListItem::new(label)
-                .group(group)
-                .on_select(move |s: &mut Workspace, _tx| {
-                    s.palette.close();
-                    match entry.clone() {
-                        crate::command::Entry::Command(command) => crate::command::run(command, s),
-                        crate::command::Entry::Task(index, _) => s.run_task(index),
-                        crate::command::Entry::RecentFile(index, _) => {
-                            if let Some(path) = s.settings.recent_files.get(index).cloned() {
-                                if let Err(error) = s.open_path(&path) {
-                                    s.set_notice(error);
-                                }
-                            }
-                        }
-                        crate::command::Entry::RecentProject(index, _) => {
-                            if let Some(path) = s.settings.recent_projects.get(index).cloned() {
-                                if let Err(error) = s.open_folder(&path) {
-                                    s.set_notice(error.to_string());
-                                }
-                            }
-                        }
-                    }
-                })
-        })
-        .collect();
-
-    let mut body = List::new();
-    for item in items {
-        body = body.item(item);
-    }
-
-    let footer = row()
-        .w_full()
-        .px(16.0)
-        .py(8.0)
-        .border_sides([1.0, 0.0, 0.0, 0.0], k.c.border_muted)
-        .child(
-            text("↑↓ move   ↵ run   esc close")
-                .font(k.ty.small)
-                .color(k.c.text_weak),
-        );
-
-    Dialog::new("palette", "Commands")
-        .bare()
-        .open(true)
-        .fit()
-        .click_outside(true)
-        .width(520.0)
-        .on_close(|s: &mut Workspace| s.palette.close())
-        .child(col().w_full().px(10.0).py(6.0).child(
-            TextInput::new(&s.palette.query)
-                .placeholder("Type a command")
-                .width(None)
-                .on_edit(|s: &mut Workspace| &mut s.palette.query)
-                .on_change(|s: &mut Workspace, _| s.palette.refresh())
-                .on_key(|s: &mut Workspace, event, _tx| match event.key {
-                    rune::edit::Key::Down => {
-                        s.palette.down();
-                        true
-                    }
-                    rune::edit::Key::Up => {
-                        s.palette.up();
-                        true
-                    }
-                    rune::edit::Key::Enter => {
-                        s.run_selected_command();
-                        true
-                    }
-                    _ => false,
-                })
-                .build(k),
-        ))
-        .child(
-            col()
-                .key("palette-results")
-                .w_full()
-                .px(6.0)
-                .max_h(320.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(body.build(k)),
-        )
-        .child(footer)
-        .build(k, layer);
-}
-
-fn dialogs(s: &Workspace, k: &Kit, layer: &mut Vec<El>) {
-    match &s.dialog {
-        None => {}
-        Some(DialogState::NewFile { name, error }) => {
-            let mut dialog = Dialog::new("new-file", "New file")
-                .open(true)
-                .fit()
-                .width(420.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    TextInput::new(name)
-                        .placeholder("name.rs")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::NewFile { name, .. }) => name,
-                            _ => unreachable!("the new-file dialog is open"),
-                        })
-                        .on_submit(|s: &mut Workspace, _| s.confirm_new_file())
-                        .build(k),
-                );
-            if let Some(error) = error {
-                dialog = dialog.child(text(error.clone()).font(k.ty.small).color(k.c.danger.fg));
-            }
-            dialog
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Create")
-                                .on_press(|s: &mut Workspace| s.confirm_new_file())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::Rename { name, error }) => {
-            let mut dialog = Dialog::new("rename", "Rename file")
-                .open(true)
-                .fit()
-                .width(420.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    TextInput::new(name)
-                        .placeholder("new name")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::Rename { name, .. }) => name,
-                            _ => unreachable!("the rename dialog is open"),
-                        })
-                        .on_submit(|s: &mut Workspace, _| s.confirm_rename())
-                        .build(k),
-                );
-            if let Some(error) = error {
-                dialog = dialog.child(text(error.clone()).font(k.ty.small).color(k.c.danger.fg));
-            }
-            dialog
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Rename")
-                                .on_press(|s: &mut Workspace| s.confirm_rename())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::RenameSymbol { name, error }) => {
-            let mut dialog = Dialog::new("rename-symbol", "Rename symbol")
-                .open(true)
-                .fit()
-                .width(420.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    TextInput::new(name)
-                        .placeholder("new name")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::RenameSymbol { name, .. }) => name,
-                            _ => unreachable!("the rename-symbol dialog is open"),
-                        })
-                        .on_submit(|s: &mut Workspace, _| s.confirm_rename_symbol())
-                        .build(k),
-                );
-            if let Some(error) = error {
-                dialog = dialog.child(text(error.clone()).font(k.ty.small).color(k.c.danger.fg));
-            }
-            dialog
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Rename")
-                                .on_press(|s: &mut Workspace| s.confirm_rename_symbol())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::RemoteFile { hosts, host, path }) => {
-            let mut list = col().w_full().gap(1.0);
-            for (index, entry) in hosts.iter().take(8).enumerate() {
-                let entry = entry.clone();
-                list = list.child(
-                    text(entry.clone())
-                        .key(format!("remote-host-{index}"))
-                        .font(k.ty.ui)
-                        .color(k.c.text_base)
-                        .w_full()
-                        .px(6.0)
-                        .py(2.0)
-                        .radius(4.0)
-                        .hover(k.c.hover)
-                        .on_press(move |s: &mut Workspace| {
-                            if let Some(DialogState::RemoteFile { host, .. }) = &mut s.dialog {
-                                host.replace_text(entry.clone());
-                            }
-                        }),
-                );
-            }
-
-            Dialog::new("remote-file", "Open a remote file")
-                .open(true)
-                .fit()
-                .width(480.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(list)
-                .child(
-                    TextInput::new(host)
-                        .placeholder("host or Host alias")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::RemoteFile { host, .. }) => host,
-                            _ => unreachable!("the remote-file dialog is open"),
-                        })
-                        .build(k),
-                )
-                .child(
-                    TextInput::new(path)
-                        .placeholder("/absolute/path/on/the/host.rs")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::RemoteFile { path, .. }) => path,
-                            _ => unreachable!("the remote-file dialog is open"),
-                        })
-                        .on_submit(|s: &mut Workspace, _| s.confirm_remote_file())
-                        .build(k),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Open")
-                                .on_press(|s: &mut Workspace| s.confirm_remote_file())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::SshHosts { hosts, name }) => {
-            let mut list = col().w_full().gap(1.0);
-            for (index, host) in hosts.iter().take(12).enumerate() {
-                let host = host.clone();
-                list = list.child(
-                    text(host.clone())
-                        .key(format!("ssh-host-{index}"))
-                        .font(k.ty.ui)
-                        .color(k.c.text_base)
-                        .w_full()
-                        .px(6.0)
-                        .py(2.0)
-                        .radius(4.0)
-                        .hover(k.c.hover)
-                        .on_press(move |s: &mut Workspace| {
-                            if let Some(DialogState::SshHosts { name, .. }) = &mut s.dialog {
-                                name.replace_text(host.clone());
-                            }
-                        }),
-                );
-            }
-
-            Dialog::new("ssh-hosts", "Connect over SSH")
-                .open(true)
-                .fit()
-                .width(420.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(list)
-                .child(
-                    TextInput::new(name)
-                        .placeholder("user@host, or a Host alias")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::SshHosts { name, .. }) => name,
-                            _ => unreachable!("the SSH dialog is open"),
-                        })
-                        .on_submit(|s: &mut Workspace, _| s.confirm_ssh_connect())
-                        .build(k),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Connect")
-                                .on_press(|s: &mut Workspace| s.confirm_ssh_connect())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::ConfirmReplace { files, matches }) => {
-            Dialog::new("confirm-replace", "Replace across the workspace")
-                .open(true)
-                .fit()
-                .width(460.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    text(format!(
-                        "Replace {matches} matches in {files} files with \"{}\"?",
-                        s.search_replacement.text
-                    ))
-                    .font(k.ty.ui)
-                    .color(k.c.text_base),
-                )
-                .child(
-                    text("Files are written on a background thread; open buffers are reloaded when it finishes.")
-                        .font(k.ty.small)
-                        .color(k.c.text_weak),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Replace")
-                                .on_press(|s: &mut Workspace| s.confirm_replace_all())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::LatexOutput { directory }) => {
-            Dialog::new("latex-output", "LaTeX output")
-                .open(true)
-                .fit()
-                .width(460.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    text("Output directory (empty writes beside the .tex file)")
-                        .font(k.ty.small)
-                        .color(k.c.text_weak),
-                )
-                .child(
-                    TextInput::new(directory)
-                        .placeholder("build")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::LatexOutput { directory }) => directory,
-                            _ => unreachable!("the LaTeX output dialog is open"),
-                        })
-                        .build(k),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Save")
-                                .on_press(|s: &mut Workspace| s.confirm_latex_output())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::TerminalSettings { shell, directory }) => {
-            Dialog::new("terminal-settings", "Terminal")
-                .open(true)
-                .fit()
-                .width(480.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    text("Shell (empty uses $SHELL)")
-                        .font(k.ty.small)
-                        .color(k.c.text_weak),
-                )
-                .child(
-                    TextInput::new(shell)
-                        .placeholder("/bin/zsh")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::TerminalSettings { shell, .. }) => shell,
-                            _ => unreachable!("the terminal-settings dialog is open"),
-                        })
-                        .build(k),
-                )
-                .child(
-                    text("Start directory (empty uses the project root)")
-                        .font(k.ty.small)
-                        .color(k.c.text_weak),
-                )
-                .child(
-                    TextInput::new(directory)
-                        .placeholder("~/work")
-                        .width(None)
-                        .on_edit(|s: &mut Workspace| match &mut s.dialog {
-                            Some(DialogState::TerminalSettings { directory, .. }) => directory,
-                            _ => unreachable!("the terminal-settings dialog is open"),
-                        })
-                        .build(k),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Save")
-                                .on_press(|s: &mut Workspace| s.confirm_terminal_settings())
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-        Some(DialogState::ConfirmDelete) => {
-            Dialog::new("confirm-delete", "Discard changes?")
-                .open(true)
-                .fit()
-                .width(420.0)
-                .on_close(|s: &mut Workspace| s.dialog = None)
-                .child(
-                    text("This file has unsaved changes.")
-                        .font(k.ty.ui)
-                        .color(k.c.text_base),
-                )
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .justify_end()
-                        .child(
-                            Button::new("Cancel")
-                                .on_press(|s: &mut Workspace| s.dialog = None)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new("Discard")
-                                .on_press(|s: &mut Workspace| {
-                                    s.dialog = None;
-                                    let active = s.active;
-                                    s.close(active);
-                                })
-                                .build(k),
-                        ),
-                )
-                .build(k, layer);
-        }
-    }
-}
-
-impl Workspace {
     /// Create the file named in the new-file dialog.
     pub fn confirm_new_file(&mut self) {
         let Some(DialogState::NewFile { name, .. }) = &self.dialog else {
@@ -5415,6 +3118,175 @@ impl Workspace {
     }
 }
 
+/// The theme tokens for the current appearance.
+pub fn kit(dark: bool) -> &'static Kit {
+    crate::theme::kit(dark)
+}
+
+
+
+fn is_table(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("csv") | Some("tsv")
+    )
+}
+
+/// Whether a file has an SVG source.
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("svg"))
+        .unwrap_or(false)
+}
+
+/// Whether a file is a Jupyter notebook.
+fn is_notebook(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("ipynb")
+    )
+}
+
+/// Collect the `.tex` files under `directory`, shallowly.
+fn collect_tex(directory: &Path, found: &mut Vec<PathBuf>, depth: usize) {
+    if depth > 3 || found.len() > 32 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_tex(&path, found, depth + 1);
+        } else if path
+            .extension()
+            .map(|extension| extension == "tex")
+            .unwrap_or(false)
+        {
+            found.push(path);
+        }
+    }
+}
+
+/// The `.tex` files that other files do not include: the build roots.
+fn tex_roots(files: &[PathBuf]) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+
+    let mut included = HashSet::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for name in tex_includes(&text) {
+            let mut path = file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(name);
+            if path.extension().is_none() {
+                path.set_extension("tex");
+            }
+            included.insert(fs_key(&path));
+        }
+    }
+    files
+        .iter()
+        .filter(|path| !included.contains(&fs_key(path)))
+        .cloned()
+        .collect()
+}
+
+/// The names in `\input{...}`, `\include{...}` and `\subfile{...}`.
+fn tex_includes(text: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for command in ["\\input", "\\include", "\\subfile"] {
+        let mut rest = text;
+        while let Some(index) = rest.find(command) {
+            let after = rest[index + command.len()..].trim_start();
+            if let Some(after) = after.strip_prefix('{') {
+                if let Some(end) = after.find('}') {
+                    let name = after[..end].trim();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            }
+            rest = &rest[index + command.len()..];
+        }
+    }
+    names
+}
+
+fn fs_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The project a file belongs to.
+///
+/// Walks up from the file looking for something that marks a project root,
+/// and falls back to the file's own directory.
+pub fn project_root(path: &Path) -> PathBuf {
+    const MARKERS: &[&str] = &[
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "CMakeLists.txt",
+        "Makefile",
+        "pom.xml",
+        "build.gradle",
+        ".git",
+        ".hg",
+    ];
+
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        if MARKERS.iter().any(|marker| current.join(marker).exists()) {
+            return current.to_path_buf();
+        }
+        directory = current.parent();
+    }
+
+    path.parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_default()
+}
+
+/// The width of one character of the editor's font, in points.
+///
+/// The view cannot ask the text system directly, so it renders an invisible
+/// run of characters and reads its width back from the previous layout. Until
+/// that has happened once, an estimate from the font size is used; it is
+/// deliberately a little generous, because underestimating would make a long
+/// line wrap and put the gutter out of step.
+/// A path with its `.` and `..` components resolved lexically, without
+/// touching the file system (so it works for files that do not exist yet).
+fn clean_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(out.components().next_back(), Some(Component::Normal(_))) || !out.pop()
+                {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
 /// Apply a server's edits to `text`.
 ///
 /// The edits arrive in document order; they are applied from the end so that
@@ -5475,6 +3347,38 @@ fn word_at(text: &str, caret: usize) -> String {
 ///
 /// LSP counts lines from zero and characters in UTF-16 code units, which is
 /// not the same as bytes whenever the text is not plain ASCII.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(text.lines().count() + 1);
+    starts.push(0);
+    for (index, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+/// The byte offset of a UTF-16 `(line, character)` position, with line starts
+/// already computed.
+fn offset_at_line(text: &str, starts: &[usize], line: u64, character: u64) -> usize {
+    let start = starts
+        .get(line as usize)
+        .copied()
+        .unwrap_or(text.len());
+    let end = text[start..]
+        .find('\n')
+        .map(|index| start + index)
+        .unwrap_or(text.len());
+    let mut units = 0u64;
+    for (index, ch) in text[start..end].char_indices() {
+        if units >= character {
+            return start + index;
+        }
+        units += ch.len_utf16() as u64;
+    }
+    end
+}
+
 fn offset_of(text: &str, line: u64, character: u64) -> usize {
     let mut offset = 0usize;
     for (current_line, current) in text.split_inclusive('\n').enumerate() {
@@ -5518,6 +3422,7 @@ fn replace_range(text: &str, range: std::ops::Range<usize>, replacement: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::editor::diagnostic_spans;
 
     fn edit(start: (u64, u64), end: (u64, u64), text: &str) -> lide_lsp::client::ServerTextEdit {
         lide_lsp::client::ServerTextEdit {
@@ -5606,6 +3511,13 @@ mod tests {
         assert!(
             workspace.latex_build_after_save,
             "saving a .tex schedules a build"
+        );
+
+        workspace.latex_build_after_save = false;
+        workspace.save(index);
+        assert!(
+            !workspace.latex_build_after_save,
+            "saving an unchanged .tex does not schedule another build"
         );
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -5911,6 +3823,69 @@ mod tests {
         assert!(
             workspace.latex_document().is_some(),
             "with no main.tex any .tex file will do"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_clicked_word_picks_the_source_line_among_the_nearby_ones() {
+        let text = "Alpha beta gamma\ndelta epsilon zeta\neta theta iota\nkappa lambda mu\n";
+        let words = ("epsilon".to_string(), "zeta".to_string(), String::new());
+        // SyncTeX said line 4 (the paragraph's last line); the word is on 2.
+        let (line, column) = refine_line(text, 4, 0, &words);
+        assert_eq!(line, 2);
+        assert_eq!(column, "delta epsilon zeta".find("zeta").unwrap());
+        // A word that is nowhere near keeps SyncTeX's answer.
+        let none = (String::new(), "omega".to_string(), String::new());
+        assert_eq!(refine_line(text, 3, 0, &none), (3, 0));
+    }
+
+    #[test]
+    fn two_presses_close_together_are_a_double_click() {
+        let mut workspace = Workspace::new();
+        workspace.now = 1.0;
+        workspace.note_pdf_press(0, 100.0, 200.0);
+        assert_eq!(workspace.pdf_double_click, None, "one press is not a pair");
+        workspace.now = 1.1;
+        workspace.note_pdf_press(0, 104.0, 202.0);
+        assert_eq!(
+            workspace.pdf_double_click,
+            Some(0),
+            "a second press nearby is a double click"
+        );
+    }
+
+    #[test]
+    fn two_presses_apart_are_not_a_double_click() {
+        let mut workspace = Workspace::new();
+        workspace.now = 1.0;
+        workspace.note_pdf_press(0, 100.0, 200.0);
+        workspace.now = 2.0;
+        workspace.note_pdf_press(0, 104.0, 202.0);
+        assert_eq!(workspace.pdf_double_click, None, "the presses were seconds apart");
+    }
+
+    #[test]
+    fn an_included_chapter_builds_its_root_document() {
+        let directory = std::env::temp_dir().join("lide-latex-root-pick");
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("chapters")).unwrap();
+        std::fs::write(
+            directory.join("paper.tex"),
+            "\\documentclass{article}\n\\begin{document}\n\\input{chapters/one}\n\\end{document}\n",
+        )
+        .unwrap();
+        let chapter = directory.join("chapters/one.tex");
+        std::fs::write(&chapter, "Chapter text.\n").unwrap();
+
+        let mut workspace = Workspace::new();
+        workspace.root = Some(directory.clone());
+        workspace.open_path(&chapter).expect("the chapter opens");
+        assert_eq!(
+            workspace.latex_document(),
+            Some(directory.join("paper.tex")),
+            "the included chapter is not the build target"
         );
 
         let _ = std::fs::remove_dir_all(&directory);
