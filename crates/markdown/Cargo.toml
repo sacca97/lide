@@ -1,0 +1,11 @@
+[package]
+name = "lide-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Markdown parsing, outline extraction and preview rendering."
+
+[dependencies]
+pulldown-cmark.workspace = true

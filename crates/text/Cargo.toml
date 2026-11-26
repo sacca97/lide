@@ -1,0 +1,12 @@
+[package]
+name = "lide-text"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rope-backed text buffer, multi-cursor selections and edit history."
+
+
+[lints.rust]
+missing_debug_implementations = "warn"

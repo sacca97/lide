@@ -1,0 +1,288 @@
+//! Settings, and the files the editor remembers between runs.
+//!
+//! Settings live in `$XDG_CONFIG_HOME/lide/settings.json`. They are read once
+//! at startup and written whenever the user changes something, so there is no
+//! separate "apply" step and no half-saved state.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// How many recent entries to keep.
+const MAX_RECENT: usize = 20;
+/// The current settings schema. Version 2 moved the default to a hidden
+/// sidebar; older files get that default once.
+const SCHEMA_VERSION: u32 = 2;
+
+/// The editor's settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// The settings schema, used to apply one-time default changes.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Whether the dark theme is used.
+    pub dark: bool,
+    /// The editor's font size, in points.
+    pub font_size: f32,
+    /// The width of the sidebar, in points.
+    pub sidebar_width: f32,
+    /// Whether the sidebar is shown.
+    pub show_sidebar: bool,
+    /// Whether the editor is split in two.
+    pub split: bool,
+    /// Whether the gutter shows line numbers.
+    pub line_numbers: bool,
+    /// The most recently opened files.
+    pub recent_files: Vec<PathBuf>,
+    /// The most recently opened folders.
+    pub recent_projects: Vec<PathBuf>,
+    /// The engine LaTeX builds use: `auto`, `pdflatex`, `xelatex` or
+    /// `lualatex`.
+    pub latex_engine: String,
+    /// The shell new terminals start. Empty means `$SHELL`.
+    pub terminal_shell: String,
+    /// The directory new terminals start in. Empty means the project root;
+    /// a relative path is taken from the project root, and `~/` from home.
+    pub terminal_directory: String,
+    /// Where LaTeX builds write. Empty means beside the `.tex` file; a
+    /// relative path is taken from there, and `~/` from home.
+    pub latex_output_directory: String,
+    /// Collapsed directories, per workspace root. A workspace with no entry
+    /// opens fully collapsed.
+    pub collapsed_directories: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            dark: true,
+            font_size: 13.0,
+            sidebar_width: 240.0,
+            show_sidebar: false,
+            split: false,
+            line_numbers: true,
+            recent_files: Vec::new(),
+            recent_projects: Vec::new(),
+            latex_engine: "auto".to_string(),
+            terminal_shell: String::new(),
+            terminal_directory: String::new(),
+            latex_output_directory: String::new(),
+            collapsed_directories: HashMap::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Read the settings, falling back to the defaults when there are none or
+    /// they cannot be parsed.
+    pub fn load() -> Self {
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match serde_json::from_str::<Settings>(&text) {
+            Ok(mut settings) => {
+                // Version 2 hides the sidebar by default. An older file has
+                // the old default stored as `true`, which cannot be told apart
+                // from a deliberate choice, so apply the new default once.
+                if settings.schema_version < SCHEMA_VERSION {
+                    settings.schema_version = SCHEMA_VERSION;
+                    settings.show_sidebar = false;
+                    settings.save();
+                }
+                settings
+            }
+            Err(error) => {
+                log::warn!("could not parse {}: {error}", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    /// Write the settings out.
+    pub fn save(&self) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        if let Some(directory) = path.parent() {
+            if let Err(error) = std::fs::create_dir_all(directory) {
+                log::warn!("could not create {}: {error}", directory.display());
+                return;
+            }
+        }
+        let text = match serde_json::to_string_pretty(self) {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("could not serialise the settings: {error}");
+                return;
+            }
+        };
+        if let Err(error) = std::fs::write(&path, text) {
+            log::warn!("could not write {}: {error}", path.display());
+        }
+    }
+
+    /// Where the settings file lives.
+    ///
+    /// `LIDE_CONFIG_DIR` overrides the XDG location. Tests and headless
+    /// snapshots set it so that checking the editor never rewrites the
+    /// settings of the person running the check.
+    pub fn path() -> Option<PathBuf> {
+        if let Some(directory) = std::env::var_os("LIDE_CONFIG_DIR") {
+            return Some(PathBuf::from(directory).join("settings.json"));
+        }
+        Some(
+            lide_platform::AppPaths::resolve()
+                .config
+                .join("settings.json"),
+        )
+    }
+
+    /// The line height the editor uses, in points.
+    pub fn line_height(&self) -> f32 {
+        (self.font_size * 1.55).round()
+    }
+
+    /// Remember a file as recently opened.
+    pub fn remember_file(&mut self, path: impl AsRef<Path>) {
+        remember(&mut self.recent_files, path.as_ref());
+    }
+
+    /// Remember a folder as recently opened.
+    pub fn remember_project(&mut self, path: impl AsRef<Path>) {
+        remember(&mut self.recent_projects, path.as_ref());
+    }
+}
+
+/// Move `path` to the front of `list`, dropping duplicates and trimming the tail.
+fn remember(list: &mut Vec<PathBuf>, path: &Path) {
+    list.retain(|existing| existing != path);
+    list.insert(0, path.to_path_buf());
+    list.truncate(MAX_RECENT);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sensible() {
+        let settings = Settings::default();
+        assert!(settings.dark);
+        assert!(settings.font_size >= 10.0);
+        assert!(settings.line_height() > settings.font_size);
+        assert!(settings.recent_files.is_empty());
+    }
+
+    #[test]
+    fn remembering_a_file_moves_it_to_the_front() {
+        let mut settings = Settings::default();
+        settings.remember_file("/a");
+        settings.remember_file("/b");
+        settings.remember_file("/a");
+        assert_eq!(
+            settings.recent_files,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
+
+    #[test]
+    fn the_recent_list_is_bounded() {
+        let mut settings = Settings::default();
+        for index in 0..50 {
+            settings.remember_file(format!("/file-{index}"));
+        }
+        assert_eq!(settings.recent_files.len(), MAX_RECENT);
+        assert_eq!(settings.recent_files[0], PathBuf::from("/file-49"));
+    }
+
+    #[test]
+    fn terminal_preferences_default_to_the_environment_and_project() {
+        let settings = Settings::default();
+        assert!(settings.terminal_shell.is_empty());
+        assert!(settings.terminal_directory.is_empty());
+    }
+
+    #[test]
+    fn the_latex_engine_defaults_to_auto() {
+        assert_eq!(Settings::default().latex_engine, "auto");
+    }
+
+    #[test]
+    fn a_latex_output_directory_survives_the_round_trip() {
+        let settings = Settings {
+            latex_output_directory: "build".to_string(),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.latex_output_directory, "build");
+        assert!(Settings::default().latex_output_directory.is_empty());
+    }
+
+    #[test]
+    fn a_chosen_latex_engine_survives_the_round_trip() {
+        let settings = Settings {
+            latex_engine: "xelatex".to_string(),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.latex_engine, "xelatex");
+        // An older file with no engine keeps the default.
+        let old: Settings = serde_json::from_str(r#"{"dark": true}"#).unwrap();
+        assert_eq!(old.latex_engine, "auto");
+    }
+
+    #[test]
+    fn the_sidebar_starts_hidden() {
+        assert!(!Settings::default().show_sidebar);
+    }
+
+    #[test]
+    fn collapsed_directories_survive_the_round_trip() {
+        let mut settings = Settings::default();
+        settings.collapsed_directories.insert(
+            PathBuf::from("/work"),
+            vec![PathBuf::from("/work/src"), PathBuf::from("/work/tests")],
+        );
+        let text = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed.collapsed_directories.get(Path::new("/work")),
+            Some(&vec![
+                PathBuf::from("/work/src"),
+                PathBuf::from("/work/tests")
+            ])
+        );
+        let old: Settings = serde_json::from_str(r#"{"dark": true}"#).unwrap();
+        assert!(old.collapsed_directories.is_empty());
+    }
+
+    #[test]
+    fn settings_round_trip_through_json() {
+        let mut settings = Settings {
+            dark: false,
+            font_size: 16.0,
+            ..Default::default()
+        };
+        settings.remember_file("/tmp/x");
+        let text = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&text).unwrap();
+        assert!(!parsed.dark);
+        assert_eq!(parsed.font_size, 16.0);
+        assert_eq!(parsed.recent_files, settings.recent_files);
+    }
+
+    #[test]
+    fn a_partial_settings_file_keeps_the_defaults() {
+        let parsed: Settings = serde_json::from_str(r#"{"dark": false}"#).unwrap();
+        assert!(!parsed.dark);
+        assert_eq!(parsed.font_size, Settings::default().font_size);
+    }
+}

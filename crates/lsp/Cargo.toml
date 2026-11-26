@@ -1,0 +1,13 @@
+[package]
+name = "lide-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A Language Server Protocol client."
+
+[dependencies]
+serde_json = "1"
+lide-rpc = { path = "../rpc" }
+thiserror.workspace = true

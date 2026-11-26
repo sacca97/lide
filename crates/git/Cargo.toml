@@ -1,0 +1,11 @@
+[package]
+name = "lide-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git status and diffs, through the git command line."
+
+[dependencies]
+thiserror.workspace = true

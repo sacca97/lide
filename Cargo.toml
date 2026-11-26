@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/lide"
+
+# Dependency policy
+# ------------------
+# * The UI framework is pinned to an exact revision of a pre-release upstream.
+#   See docs/adr/0001-ui-framework-rune.md.
+# * `libc` is pinned exactly because a newer release removes a constant that a
+#   transitive dependency of the PDF renderer still references.
+# * Everything else uses a caret requirement; `Cargo.lock` is committed so
+#   builds stay reproducible without freezing patch releases forever.
+
+[workspace.dependencies]
+# --- UI framework -----------------------------------------------------------
+# Rune is pre-release and its API moves, so the revision is pinned exactly.
+rune = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a", features = [
+    "tooling",
+] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a", features = [
+    "markdown",
+    "mermaid",
+    "math",
+] }
+rune-edit = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+rune-image = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+
+# --- Markdown -----------------------------------------------------------------
+pulldown-cmark = { version = "0.13", default-features = false, features = [
+    "html",
+    "simd",
+] }
+
+# --- PDF ----------------------------------------------------------------------
+pdf = { version = "0.10", default-features = false }
+
+# --- Errors / plumbing --------------------------------------------------------
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+
+# --- Platform -----------------------------------------------------------------
+dirs = "6"
+
+# Pinned: libc >= 0.2.190 removed the `ENOATTR` constant that `xattr 0.2.3`
+# (a transitive dependency of the PDF renderer's HTTP client) still
+# references. See docs/adr/0004-pdf-rendering.md.
+libc = "=0.2.189"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# Rune vendors patched copies of these crates. Cargo does not inherit a
+# dependency's `[patch.crates-io]`, so the same revisions have to be patched
+# here as well. The list mirrors Rune's own root manifest; when the revision
+# moves, check Rune's Cargo.toml for the current list.
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "ac452a9c2b75c462c5eb1659024178f1fbbd416a" }

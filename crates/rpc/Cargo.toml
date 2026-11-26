@@ -1,0 +1,11 @@
+[package]
+name = "lide-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Content-Length framed JSON over a byte stream (LSP and lide's agent)."
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "lide-pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PDF document support: page navigation, text extraction and rasterisation."
+
+[dependencies]
+rune.workspace = true
+rune-image.workspace = true
+rune-kit.workspace = true
+rune-edit.workspace = true
+log.workspace = true
+pdf.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["pdfium"]
+# Rasterisation and positioned text extraction need a PDFium shared library
+# at runtime. See docs/adr/0004-pdf-rendering.md and scripts/fetch-pdfium.sh.
+pdfium = ["dep:pdfium-render"]
+
+[dependencies.pdfium-render]
+version = "0.9"
+optional = true
+default-features = false
+features = ["pdfium_latest", "image_latest", "thread_safe"]

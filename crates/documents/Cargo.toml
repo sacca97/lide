@@ -1,0 +1,17 @@
+[package]
+name = "lide-documents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Document kinds, capabilities and the provider registry."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# Structured data: validation (all three) and JSON formatting. `quick-xml`
+# is also what formats XML, and `yaml-rust2` is the maintained YAML parser.
+toml = "0.8"
+yaml-rust2 = "0.10"
+quick-xml = "0.41"

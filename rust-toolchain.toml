@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+# `rust-analyzer` is here so that the LSP integration works out of the box:
+# without the component, the rustup proxy answers "Unknown binary
+# 'rust-analyzer' in official toolchain" and the editor reports it instead of
+# getting a language server.
+components = ["rustfmt", "clippy", "rust-analyzer"]
+profile = "minimal"

@@ -1,0 +1,34 @@
+[package]
+name = "lide-workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Projects, tabs, panes and the document registry wiring."
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+rune-edit.workspace = true
+rune-image.workspace = true
+log.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+notify = "9"
+lide-text = { path = "../text" }
+lide-editor = { path = "../editor" }
+lide-markdown = { path = "../markdown" }
+lide-pdf = { path = "../pdf" }
+lide-documents = { path = "../documents" }
+lide-search = { path = "../search" }
+lide-resource = { path = "../resource" }
+lide-remote = { path = "../remote" }
+lide-lsp = { path = "../lsp" }
+lide-git = { path = "../git" }
+lide-latex = { path = "../latex" }
+lide-terminal = { path = "../terminal" }
+lide-platform = { path = "../platform" }
+
+[dev-dependencies]
+rune-edit.workspace = true

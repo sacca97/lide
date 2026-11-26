@@ -1,0 +1,23 @@
+[package]
+name = "lide-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The lide agent and client: files over a framed JSON protocol."
+
+[[bin]]
+name = "lide-agent"
+path = "src/bin/lide-agent.rs"
+
+[dev-dependencies]
+lide-editor = { path = "../editor" }
+
+[dependencies]
+lide-rpc = { path = "../rpc" }
+lide-resource = { path = "../resource" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+thiserror.workspace = true

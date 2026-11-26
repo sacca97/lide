@@ -1,0 +1,4 @@
+name,language,stars,notes
+Rune,Rust,7900,"a native UI framework"
+lide,Rust,0,"this editor"
+Zed,Rust,60000,"GPL, so not vendored"
