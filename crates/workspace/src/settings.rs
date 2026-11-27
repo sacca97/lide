@@ -12,9 +12,61 @@ use serde::{Deserialize, Serialize};
 /// How many recent entries to keep.
 const MAX_RECENT: usize = 20;
 /// The current settings schema. Version 2 moved the default to a hidden
-/// sidebar; version 3 moved the default to a hidden document outline. Older
-/// files get each new default once.
-const SCHEMA_VERSION: u32 = 3;
+/// sidebar; version 3 moved the default to a hidden document outline; version
+/// 4 let the theme follow the system. Older files get each new default once.
+const SCHEMA_VERSION: u32 = 4;
+
+/// Which appearance the editor draws in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// Follow the desktop's light or dark appearance.
+    #[default]
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
+impl Theme {
+    /// The name shown to the user and stored in the settings file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    /// The theme named `name`, if there is one.
+    pub fn from_name(name: &str) -> Option<Theme> {
+        match name {
+            "system" => Some(Theme::System),
+            "light" => Some(Theme::Light),
+            "dark" => Some(Theme::Dark),
+            _ => None,
+        }
+    }
+
+    /// The next theme in the cycle, for a command that steps through them.
+    pub fn next(self) -> Theme {
+        match self {
+            Theme::System => Theme::Light,
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::System,
+        }
+    }
+
+    /// Whether this theme draws dark, given what the desktop is showing.
+    pub fn is_dark(self, system_dark: bool) -> bool {
+        match self {
+            Theme::System => system_dark,
+            Theme::Light => false,
+            Theme::Dark => true,
+        }
+    }
+}
 
 /// The editor's settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +75,10 @@ pub struct Settings {
     /// The settings schema, used to apply one-time default changes.
     #[serde(default)]
     pub schema_version: u32,
-    /// Whether the dark theme is used.
+    /// The appearance: follow the system, or force light or dark.
+    pub theme: Theme,
+    /// Whether the dark theme is used. Kept for settings files written before
+    /// [`Theme`] existed; [`Settings::migrate`] folds it into `theme` once.
     pub dark: bool,
     /// The editor's font size, in points.
     pub font_size: f32,
@@ -67,6 +122,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            theme: Theme::System,
             dark: true,
             font_size: 13.0,
             sidebar_width: 240.0,
@@ -100,6 +156,15 @@ fn migrate(settings: &mut Settings) -> bool {
     if version < 3 {
         // The old default was a visible outline; apply the hidden default once.
         settings.show_outline = false;
+    }
+    if version < 4 {
+        // Before this the theme was a `dark` flag. Keep the appearance the user
+        // last chose instead of snapping everyone to "follow the system".
+        settings.theme = if settings.dark {
+            Theme::Dark
+        } else {
+            Theme::Light
+        };
     }
     settings.schema_version = SCHEMA_VERSION;
     version < SCHEMA_VERSION
@@ -286,9 +351,54 @@ mod tests {
             ..Default::default()
         };
         assert!(migrate(&mut settings));
-        assert_eq!(settings.schema_version, 3);
+        assert_eq!(settings.schema_version, SCHEMA_VERSION);
         assert!(!settings.show_outline);
         assert!(!migrate(&mut settings), "a current file is left alone");
+    }
+
+    #[test]
+    fn a_theme_chosen_before_the_theme_setting_existed_is_kept() {
+        // A file written when the theme was a `dark` flag, with no `theme`.
+        let mut settings: Settings =
+            serde_json::from_str(r#"{"schema_version": 3, "dark": false}"#).unwrap();
+        assert!(migrate(&mut settings));
+        assert_eq!(
+            settings.theme,
+            Theme::Light,
+            "a user who chose light keeps light, rather than being sent back to the system"
+        );
+
+        let mut settings: Settings =
+            serde_json::from_str(r#"{"schema_version": 3, "dark": true}"#).unwrap();
+        assert!(migrate(&mut settings));
+        assert_eq!(settings.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn a_new_settings_file_follows_the_system() {
+        assert_eq!(Settings::default().theme, Theme::System);
+    }
+
+    #[test]
+    fn the_theme_names_round_trip_and_cycle() {
+        let mut theme = Theme::System;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(theme.name());
+            assert_eq!(Theme::from_name(theme.name()), Some(theme));
+            theme = theme.next();
+        }
+        assert_eq!(seen, vec!["system", "light", "dark"]);
+        assert_eq!(theme, Theme::System, "three steps in a cycle of three");
+        assert_eq!(Theme::from_name("solarized"), None);
+    }
+
+    #[test]
+    fn the_system_theme_follows_the_desktop() {
+        assert!(Theme::System.is_dark(true));
+        assert!(!Theme::System.is_dark(false));
+        assert!(!Theme::Light.is_dark(true), "light ignores a dark desktop");
+        assert!(Theme::Dark.is_dark(false), "dark ignores a light desktop");
     }
 
     #[test]

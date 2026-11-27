@@ -165,6 +165,8 @@ pub enum DialogState {
     },
     /// Confirm deleting the active document.
     ConfirmDelete,
+    /// Choose the appearance.
+    Preferences,
 }
 
 /// The state of the editor.
@@ -409,8 +411,12 @@ impl Workspace {
     }
 
     /// Whether the dark theme is in use.
-    pub fn dark(&self) -> bool {
-        self.theme_override.unwrap_or(self.settings.dark)
+    ///
+    /// `system_dark` is what the desktop is showing. A theme chosen by hand
+    /// wins over it; `Theme::System` follows it.
+    pub fn dark(&self, system_dark: bool) -> bool {
+        self.theme_override
+            .unwrap_or_else(|| self.settings.theme.is_dark(system_dark))
     }
 
     /// The folder the workspace is rooted at.
@@ -565,6 +571,11 @@ impl Workspace {
     }
 
     /// Ask for the shell and start directory new terminals use.
+    /// Ask which appearance to use.
+    pub fn begin_preferences(&mut self) {
+        self.dialog = Some(DialogState::Preferences);
+    }
+
     pub fn begin_terminal_settings(&mut self) {
         self.dialog = Some(DialogState::TerminalSettings {
             shell: Box::new(TextEdit::new(self.settings.terminal_shell.clone())),
@@ -1035,10 +1046,17 @@ impl Workspace {
 
     // --- View state ------------------------------------------------------
 
-    /// Switch between the light and the dark theme.
+    /// Step the appearance through system, light and dark.
     pub fn toggle_theme(&mut self) {
-        self.settings.dark = !self.settings.dark;
+        self.settings.theme = self.settings.theme.next();
         self.settings.save();
+    }
+
+    /// Choose an appearance from the settings dialog.
+    pub fn set_theme(&mut self, theme: crate::settings::Theme) {
+        self.settings.theme = theme;
+        self.settings.save();
+        self.dialog = None;
     }
 
     /// Split the editor in two, or close the split.
@@ -2829,11 +2847,32 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_toggles() {
+    fn the_theme_cycles_through_system_light_and_dark() {
         let mut workspace = Workspace::new();
-        let before = workspace.settings.dark;
+        workspace.settings.theme = crate::settings::Theme::System;
         workspace.toggle_theme();
-        assert_eq!(workspace.settings.dark, !before);
-        workspace.settings.dark = before;
+        assert_eq!(workspace.settings.theme, crate::settings::Theme::Light);
+        workspace.toggle_theme();
+        assert_eq!(workspace.settings.theme, crate::settings::Theme::Dark);
+        workspace.toggle_theme();
+        assert_eq!(
+            workspace.settings.theme,
+            crate::settings::Theme::System,
+            "the cycle comes back to following the system"
+        );
+    }
+
+    #[test]
+    fn the_system_theme_draws_whatever_the_desktop_shows() {
+        let mut workspace = Workspace::new();
+        workspace.settings.theme = crate::settings::Theme::System;
+        assert!(workspace.dark(true), "a dark desktop draws dark");
+        assert!(!workspace.dark(false), "a light desktop draws light");
+
+        workspace.settings.theme = crate::settings::Theme::Light;
+        assert!(!workspace.dark(true), "a chosen light theme wins");
+
+        workspace.settings.theme = crate::settings::Theme::Dark;
+        assert!(workspace.dark(false), "a chosen dark theme wins");
     }
 }

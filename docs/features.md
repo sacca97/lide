@@ -30,7 +30,9 @@ verified.
   tab opens into, dragging a tab onto the other pane moves it there, and the
   **X** in the strip closes the split. The focused pane carries an accent rule.
 - Neutral status bar with branch, problems, language, cursor, size and server.
-- Light and dark themes; settings persist in `$XDG_CONFIG_HOME/lide/settings.json`
+- Light and dark themes, following the desktop by default; **Preferences** in the
+  palette (or **Cycle theme: system, light, dark**) switches between following the
+  system, always light and always dark. Settings persist in `$XDG_CONFIG_HOME/lide/settings.json`
   (override with `LIDE_CONFIG_DIR`).
 - Recent files and projects are remembered and listed in the command palette.
 - File watcher: a clean file reloads silently; a file with unsaved changes is
@@ -164,7 +166,7 @@ not recognised report an error rather than being guessed at.
 
 | Key | Meaning |
 | --- | --- |
-| `dark` | dark or light theme |
+| `theme` | `system`, `light` or `dark` (`dark` is kept for older files) |
 | `font_size` | editor font size in points |
 | `sidebar_width` | sidebar width in points |
 | `show_sidebar` | sidebar visibility |

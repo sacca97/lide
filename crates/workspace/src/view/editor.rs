@@ -3,7 +3,7 @@ use std::path::Path;
 use rune::{col, el, icon, row, text, text_input, Cx, El, Live, ScrollPos, ScrollSpec, Tx, WheelEvent};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 use rune_kit::syntax::{highlight, lang_for_path, SyntaxTheme};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
+use rune_kit::{Button, ControlSize, Kit, TextInput};
 
 use crate::view::terminal::terminal_view;
 use crate::view::{empty_note, icon_button};
@@ -114,14 +114,11 @@ pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {
         strip = strip.child(el().grow(1.0));
     }
     if preview {
+        // An eye, sized and shaped like the other icon buttons in the strip:
+        // the built PDF shown beside the source, without building.
         strip = strip.child(
-            Button::new("Preview")
-                .variant(ButtonVariant::Outline)
-                .control_size(ControlSize::Mini)
-                .icon(&crate::icons::EYE)
-                .help("Open the built PDF beside the source without building")
+            icon_button(&crate::icons::EYE, "Preview PDF", k)
                 .on_press(|s: &mut Workspace| s.open_pdf_beside_source())
-                .build(k)
                 .key("latex-preview"),
         );
     }

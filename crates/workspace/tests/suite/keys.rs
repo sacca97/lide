@@ -100,7 +100,7 @@ fn enter_runs_the_highlighted_command() {
     let mut rt = runtime();
     rt.state.palette.open(&[], &lide_workspace::command::Recents::default());
     // Narrow the list to one command so the highlight is unambiguous.
-    rt.state.palette.query = rune_edit::TextEdit::new("toggle light");
+    rt.state.palette.query = rune_edit::TextEdit::new("cycle theme");
     rt.state.palette.refresh();
     rt.frame(0.0);
     assert_eq!(
@@ -108,11 +108,15 @@ fn enter_runs_the_highlighted_command() {
         Some(lide_workspace::command::Command::ToggleTheme)
     );
 
-    let before = rt.state.settings.dark;
+    let before = rt.state.settings.theme;
     press(&mut rt, key(Key::Enter));
 
     assert!(!rt.state.palette.open, "running a command closes the palette");
-    assert_eq!(rt.state.settings.dark, !before, "the theme toggled");
+    assert_eq!(
+        rt.state.settings.theme,
+        before.next(),
+        "the theme stepped to the next appearance"
+    );
 }
 
 #[test]

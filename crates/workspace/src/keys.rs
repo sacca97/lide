@@ -212,6 +212,8 @@ pub fn handle(workspace: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool 
             Some(DialogState::SshHosts { .. }) => workspace.confirm_ssh_connect(),
             Some(DialogState::RemoteFile { .. }) => workspace.confirm_remote_file(),
             Some(DialogState::ConfirmDelete) => workspace.confirm_delete(),
+            // The appearance is chosen by clicking it; Enter is "done".
+            Some(DialogState::Preferences) => workspace.dialog = None,
             None => {}
         }
         return true;

@@ -411,6 +411,76 @@ pub(crate) fn dialogs(s: &Workspace, k: &Kit, layer: &mut Vec<El>) {
                 )
                 .build(k, layer);
         }
+        Some(DialogState::Preferences) => {
+            // Each option is a row the user can click; the active one carries
+            // an accent border so the current choice is visible at a glance.
+            let mut choices = col().w_full().gap(6.0);
+            for (theme, label, hint) in [
+                (
+                    crate::settings::Theme::System,
+                    "Follow the system",
+                    "Light until the desktop switches to dark",
+                ),
+                (
+                    crate::settings::Theme::Light,
+                    "Light",
+                    "Always light, whatever the desktop shows",
+                ),
+                (
+                    crate::settings::Theme::Dark,
+                    "Dark",
+                    "Always dark, whatever the desktop shows",
+                ),
+            ] {
+                let active = s.settings.theme == theme;
+                choices = choices.child(
+                    col()
+                        .key(format!("preferences-theme-{}", theme.name()))
+                        .w_full()
+                        .gap(2.0)
+                        .px(10.0)
+                        .py(8.0)
+                        .radius(6.0)
+                        .fill(if active { k.c.surface_base } else { k.c.page })
+                        .border(1.0, if active { k.c.text_accent } else { k.c.border_base })
+                        .hover(k.c.hover)
+                        .on_press(move |s: &mut Workspace| s.set_theme(theme))
+                        .child(
+                            text(label)
+                                .font(k.ty.ui_medium)
+                                .color(if active { k.c.text_accent } else { k.c.text_base }),
+                        )
+                        .child(
+                            text(hint)
+                                .font(k.ty.small)
+                                .color(k.c.text_weak),
+                        ),
+                );
+            }
+
+            Dialog::new("preferences", "Appearance")
+                .open(true)
+                .fit()
+                .width(460.0)
+                .on_close(|s: &mut Workspace| s.dialog = None)
+                .child(
+                    text("Theme")
+                        .font(k.ty.small)
+                        .color(k.c.text_weak),
+                )
+                .child(choices)
+                .child(
+                    row()
+                        .w_full()
+                        .justify_end()
+                        .child(
+                            Button::new("Done")
+                                .on_press(|s: &mut Workspace| s.dialog = None)
+                                .build(k),
+                        ),
+                )
+                .build(k, layer);
+        }
     }
 }
 

@@ -215,6 +215,10 @@ pub(crate) const SCENES: &[Scene] = &[
             terminal.selection = Some(((1, 0), (2, 17)));
         }
     }),
+    ("preferences", |s| {
+        open_showcase(s);
+        s.begin_preferences();
+    }),
     ("terminal-settings", |s| {
         open_showcase(s);
         s.settings.terminal_shell = "/bin/zsh".to_string();

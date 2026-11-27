@@ -20,7 +20,8 @@ use status::status_bar;
 
 /// Draw the whole window.
 pub fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
-    let k = kit(s.dark());
+    // The desktop's appearance is what `Theme::System` follows.
+    let k = kit(s.dark(cx.env().system_dark));
     let mut overlays = Vec::new();
 
     s.terminal_rect.set(cx.layout("terminal-area"));

@@ -44,6 +44,8 @@ pub enum Command {
     RemoteOpen,
     /// Search the active terminal's scrollback.
     FindInTerminal,
+    /// Choose the appearance: follow the system, or force light or dark.
+    Preferences,
     /// Choose the shell and start directory for new terminals.
     TerminalSettings,
     /// Choose where LaTeX builds write.
@@ -268,6 +270,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         shortcut: None,
     },
     CommandSpec {
+        command: Command::Preferences,
+        label: "Preferences",
+        group: "View",
+        shortcut: None,
+    },
+    CommandSpec {
         command: Command::TerminalSettings,
         label: "Terminal settings",
         group: "Terminal",
@@ -377,7 +385,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         command: Command::ToggleTheme,
-        label: "Toggle light / dark theme",
+        label: "Cycle theme: system, light, dark",
         group: "View",
         shortcut: None,
     },
@@ -648,6 +656,7 @@ pub fn run(command: Command, workspace: &mut Workspace) {
         Command::SshConnect => workspace.begin_ssh_connect(),
         Command::RemoteOpen => workspace.begin_remote_file(),
         Command::FindInTerminal => workspace.open_terminal_find(),
+        Command::Preferences => workspace.begin_preferences(),
         Command::TerminalSettings => workspace.begin_terminal_settings(),
         Command::LatexOutput => workspace.begin_latex_output(),
         Command::ValidateDocument => workspace.validate_document(),
