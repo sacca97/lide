@@ -15,7 +15,9 @@ pub mod find;
 pub mod icons;
 pub mod images;
 pub mod keys;
+pub mod latex_discovery;
 pub mod notebook_view;
+pub mod poll;
 pub mod servers;
 pub mod settings;
 pub mod tasks;
@@ -34,7 +36,8 @@ use rune_kit::Kit;
 
 use crate::command::PaletteState;
 use crate::find::FindState;
-use crate::servers::{Outcome, Servers};
+use crate::latex_discovery::fs_key;
+use crate::servers::Servers;
 use crate::settings::Settings;
 use crate::tree::FileTree;
 
@@ -835,42 +838,6 @@ impl Workspace {
         self.notice = Some("connecting over SSH…".to_string());
     }
 
-    /// Collect the remote open, if it has finished.
-    fn poll_remote_open(&mut self) -> bool {
-        let Some(receiver) = self.remote_open.as_ref() else {
-            return false;
-        };
-        match receiver.try_recv() {
-            Ok(Ok(editor)) => {
-                self.remote_open = None;
-                match editor
-                    .location
-                    .as_ref()
-                    .and_then(lide_resource::Location::extension)
-                {
-                    Some(extension) if extension.eq_ignore_ascii_case("md") => {
-                        let outline = lide_markdown::outline(editor.text());
-                        self.documents.push(Document::Markdown { editor, outline });
-                    }
-                    _ => self.documents.push(Document::Text(editor)),
-                }
-                self.active = self.documents.len() - 1;
-                self.notice = None;
-                true
-            }
-            Ok(Err(error)) => {
-                self.remote_open = None;
-                self.notice = Some(format!("could not open the remote file: {error}"));
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.remote_open = None;
-                self.notice = Some("the remote open stopped unexpectedly".to_string());
-                true
-            }
-        }
-    }
 
     pub fn open_terminal(&mut self) -> Result<(), String> {
         let directory = self.terminal_start_directory();
@@ -917,27 +884,6 @@ impl Workspace {
         }
     }
 
-    /// Where a LaTeX build for `tex` writes, from the settings.
-    ///
-    /// Empty means beside the source; a relative path is taken from the
-    /// source's directory, and `~/` from home.
-    fn latex_output_directory(&self, tex: &Path) -> Option<PathBuf> {
-        let configured = self.settings.latex_output_directory.trim();
-        if configured.is_empty() {
-            return None;
-        }
-        let path = match configured.strip_prefix("~/") {
-            Some(rest) => std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(rest))
-                .unwrap_or_else(|| PathBuf::from(configured)),
-            None => PathBuf::from(configured),
-        };
-        Some(if path.is_absolute() {
-            path
-        } else {
-            tex.parent().unwrap_or_else(|| Path::new(".")).join(path)
-        })
-    }
 
     /// Ask where LaTeX builds should write.
     pub fn begin_latex_output(&mut self) {
@@ -1054,68 +1000,8 @@ impl Workspace {
         }
     }
 
-    /// Let the image viewer decode what it has been given.
-    fn poll_images(&mut self) -> bool {
-        let Some(cache) = self.images.as_ref() else {
-            return false;
-        };
-        let mut changed = false;
-        for document in &mut self.documents {
-            if let Document::Image(image) = document {
-                changed |= image.poll(cache);
-            }
-        }
-        changed
-    }
 
-    /// Collect the build's output, and open the PDF when it succeeds.
-    fn poll_build(&mut self) -> bool {
-        let Some(build) = self.build.as_mut() else {
-            return false;
-        };
-        let was_running = !build.finished;
-        let changed = build.poll();
 
-        if was_running && build.finished {
-            if build.success {
-                let pdf = build.options.pdf_path();
-                let tex = build.options.tex_path();
-                if pdf.exists() {
-                    // The preview is reloaded before it is focused: the build
-                    // wrote a new file, and an open view still holds the old
-                    // pages and text.
-                    self.reload_pdf_previews(&pdf);
-                    self.show_pdf_beside(&tex, &pdf);
-                }
-            } else {
-                let count = build.errors().len();
-                self.notice = Some(if count == 0 {
-                    "the build failed".to_string()
-                } else {
-                    format!("the build failed with {count} errors")
-                });
-                self.sidebar = SidebarMode::Problems;
-                self.settings.show_sidebar = true;
-            }
-        }
-        changed
-    }
-
-    /// Keep the terminals the size of the area they are drawn in.
-    fn poll_terminals(&mut self) -> bool {
-        let size = self.terminal_size();
-        let mut changed = false;
-        for document in &mut self.documents {
-            if let Document::Terminal(terminal) = document {
-                if terminal.emulator.size() != size {
-                    terminal.resize(size);
-                    changed = true;
-                }
-                changed |= terminal.poll();
-            }
-        }
-        changed
-    }
 
     /// Make a document active.
     ///
@@ -2000,48 +1886,6 @@ impl Workspace {
         }
     }
 
-    /// The main `.tex` file to build.
-    ///
-    /// An included chapter is not the build target. Prefer `main.tex`, then
-    /// the active file when it is a root document, then the shallowest file
-    /// that nothing else includes.
-    fn latex_document(&self) -> Option<PathBuf> {
-        let active = self
-            .documents
-            .get(self.focused_index())
-            .and_then(|document| document.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "tex"))
-            .map(Path::to_path_buf);
-        let Some(root) = self.root.as_ref() else {
-            return active;
-        };
-
-        let main = root.join("main.tex");
-        if main.is_file() {
-            return Some(main);
-        }
-
-        let mut found: Vec<PathBuf> = Vec::new();
-        collect_tex(root, &mut found, 0);
-        found.sort();
-        let roots = tex_roots(&found);
-        // The user opened the file and the tree walks the workspace, so the
-        // two spellings of the same path can differ (a symlink, macOS's
-        // canonical case). Same file means the same document.
-        if let Some(active) = active
-            .as_ref()
-            .filter(|path| is_one_of_roots(path, &roots))
-        {
-            return Some(active.clone());
-        }
-        roots
-            .iter()
-            .find(|path| path.file_stem() == root.file_name())
-            .cloned()
-            .or_else(|| roots.first().cloned())
-            .or(active)
-            .or_else(|| found.into_iter().next())
-    }
 
     /// Stop the running build.
     pub fn cancel_build(&mut self) {
@@ -2348,106 +2192,8 @@ impl Workspace {
 
     // --- Frames -----------------------------------------------------------
 
-    /// Collect the pages the PDF viewer rendered in the background, the files
-    /// that changed on disk, and the search results that arrived.
-    pub fn poll(&mut self) -> bool {
-        self.poll_at(0.0)
-    }
 
-    /// [`Workspace::poll`], with the app's clock for the completion debounce.
-    pub fn poll_at(&mut self, now: f64) -> bool {
-        self.now = now;
-        let mut changed = self.poll_pdfs();
-        changed |= self.poll_pdf_double_click();
-        changed |= self.poll_source_click();
-        changed |= self.poll_files();
-        if let Some(search) = self.search.as_mut() {
-            changed |= search.poll();
-        }
-        self.refresh_git(false);
-        changed |= self.poll_terminals();
-        changed |= self.poll_images();
-        changed |= self.poll_build();
-        changed |= self.poll_servers();
-        changed |= self.poll_completions();
-        changed |= self.poll_replace();
-        changed |= self.poll_remote_open();
-        // A save during a build is not lost: the request waits for the running
-        // build to finish, then rebuilds with what was saved.
-        if self.latex_build_after_save
-            && self.build.as_ref().is_none_or(|build| build.finished)
-        {
-            self.latex_build_after_save = false;
-            self.build_latex();
-            changed = true;
-        }
-        changed
-    }
 
-    /// Ask for completions when typing moved the caret to the end of a word.
-    ///
-    /// This is what makes completion feel automatic without asking the server
-    /// on every frame: a request goes out once per *edit*, only when the
-    /// character before the caret is part of a word, and no more often than
-    /// [`COMPLETION_DEBOUNCE`]. Moving the caret by clicking is not an edit and
-    /// does not open the list.
-    fn poll_completions(&mut self) -> bool {
-        if self.completion_open {
-            // The list belongs where the request was made. A click, or more
-            // typing, moves the caret and dismisses it.
-            let current = self
-                .active_document()
-                .and_then(|document| document.editor())
-                .map(|editor| (editor.edit.focus, editor.edit.text.len()));
-            if current.is_some() && self.last_completion != current {
-                self.close_completions();
-            }
-            return false;
-        }
-        let Some((path, position)) = self.caret() else {
-            return false;
-        };
-        let Some((caret, length, preceded_by_word)) = self
-            .active_document()
-            .and_then(|d| d.editor())
-            .map(|editor| {
-                let caret = editor.edit.focus;
-                let length = editor.edit.text.len();
-                let preceded_by_word = editor.edit.text[..caret]
-                    .chars()
-                    .next_back()
-                    .map(|ch| ch.is_alphanumeric() || ch == '_')
-                    .unwrap_or(false);
-                (caret, length, preceded_by_word)
-            })
-        else {
-            return false;
-        };
-
-        let previous = self.last_completion;
-        if previous == Some((caret, length)) {
-            return false;
-        }
-        // Only a text change earns an automatic request. Clicking somewhere
-        // in a word moves the caret but must not pop a list of insertions.
-        let typed = previous.is_none_or(|(_, seen_length)| seen_length != length);
-        self.last_completion = Some((caret, length));
-        if !typed {
-            return false;
-        }
-        // Only after a word character: completing after a space or a bracket
-        // is usually noise, and the user can ask for it explicitly.
-        if !preceded_by_word {
-            return false;
-        }
-        if self.now - self.last_completion_at < COMPLETION_DEBOUNCE {
-            return false;
-        }
-
-        self.last_completion_at = self.now;
-        self.servers.request_completion(&path, position);
-        false
-    }
 
     /// Ask for completions at the caret, whatever precedes it.
     pub fn request_completions(&mut self) {
@@ -2516,74 +2262,6 @@ impl Workspace {
         self.completion_selected = 0;
     }
 
-    /// Keep the language servers in step with the open documents.
-    fn poll_servers(&mut self) -> bool {
-        // Send the text of every open document that changed.
-        let documents: Vec<(PathBuf, String)> = self
-            .documents
-            .iter()
-            .filter_map(|document| {
-                let path = document.path()?.to_path_buf();
-                let text = document.text()?.to_string();
-                Some((path, text))
-            })
-            .collect();
-        self.servers.sync(&documents);
-
-        let outcomes = self.servers.poll();
-        let mut changed = !outcomes.is_empty();
-        for outcome in outcomes {
-            match outcome {
-                Outcome::Definition(path, position) => {
-                    let line = position.line + 1;
-                    let column = position.character as usize;
-                    self.open_match(path, line, column);
-                }
-                Outcome::Hover(text) => {
-                    self.hover = if text.is_empty() { None } else { Some(text) };
-                }
-                Outcome::References(locations) => {
-                    self.references = locations
-                        .into_iter()
-                        .map(|(path, position)| {
-                            (path, position.line + 1, position.character as usize)
-                        })
-                        .collect();
-                    self.sidebar = SidebarMode::Places;
-                    self.settings.show_sidebar = true;
-                }
-                Outcome::Completions(items) => {
-                    if items.is_empty() {
-                        self.close_completions();
-                    } else {
-                        self.completions = items;
-                        self.completion_selected = 0;
-                        self.completion_open = true;
-                    }
-                }
-                Outcome::CodeActions(actions) => {
-                    if actions.is_empty() {
-                        self.code_actions_open = false;
-                        self.set_notice("no code actions here".to_string());
-                    } else {
-                        self.code_actions = actions;
-                        self.code_actions_open = true;
-                    }
-                }
-                Outcome::Rename(files) => {
-                    self.apply_workspace_edit(&files);
-                }
-                Outcome::Format(edits) => {
-                    self.apply_formatting(&edits);
-                    changed = true;
-                }
-                Outcome::Unsupported(what) => {
-                    self.notice = Some(format!("the language server does not support {what}"));
-                }
-            }
-        }
-        changed
-    }
 
     /// Apply a formatting response to the active document.
     ///
@@ -2941,47 +2619,6 @@ impl Workspace {
         self.notice = Some("replacing…".to_string());
     }
 
-    /// Collect the replace worker's progress, and put the results into the
-    /// open documents when it finishes.
-    fn poll_replace(&mut self) -> bool {
-        let Some(replace) = self.replace.as_mut() else {
-            return false;
-        };
-        let changed = replace.poll();
-        if replace.running {
-            return changed;
-        }
-
-        let files = replace.files.clone();
-        let file_count = files.len();
-        let matches = replace.matches;
-        let skipped = replace.skipped;
-        let error = replace.error.clone();
-        self.replace = None;
-
-        for path in files {
-            for document in &mut self.documents {
-                if document.path() == Some(path.as_path()) && !document.is_dirty() {
-                    if let Some(editor) = document.editor_mut() {
-                        let _ = editor.reload();
-                    }
-                }
-            }
-            self.refresh_image_previews(&path);
-        }
-
-        self.notice = Some(match error {
-            Some(error) => format!("replace stopped: {error}"),
-            None if skipped > 0 => format!(
-                "replaced {matches} matches in {file_count} files; skipped {skipped} that were not text"
-            ),
-            None => format!("replaced {matches} matches in {file_count} files"),
-        });
-
-        // Show the tree as it is now, not as it was before replacing.
-        self.run_search();
-        true
-    }
 
     /// Open the file a search result is in and put the caret on the match.
     pub fn open_match(&mut self, path: PathBuf, line: u64, column: usize) {
@@ -3002,191 +2639,9 @@ impl Workspace {
             .unwrap_or(0)
     }
 
-    fn poll_pdfs(&mut self) -> bool {
-        let Some(cache) = self.images.as_ref() else {
-            return false;
-        };
-        let mut changed = false;
-        let mut scrolls = Vec::new();
-        for (index, document) in self.documents.iter_mut().enumerate() {
-            if let Document::Pdf(pdf) = document {
-                let pane = if self.split_document == Some(index) { 1 } else { 0 };
-                pdf.fit_to_width(self.pdf_widths[pane].get());
-                changed |= pdf.poll(cache);
-                if let Some(offset) = pdf.take_scroll_wanted() {
-                    scrolls.push((index, offset));
-                }
-            }
-        }
-        for (index, offset) in scrolls {
-            let pane = if self.split_document == Some(index) { 1 } else { 0 };
-            self.request_scroll(format!("pdf-scroll-{pane}"), offset);
-        }
-        changed
-    }
 
-    /// A Cmd/Ctrl-click on a LaTeX source shows the same place in the PDF.
-    ///
-    /// The text field places the caret exactly where it was clicked, wrapped
-    /// lines included, so the jump starts from the caret instead of from a
-    /// guess about the layout. A caret that moves while no key was pressed is
-    /// a click; arrows and typing arrive with a key event just before.
-    fn poll_source_click(&mut self) -> bool {
-        let index = self.focused_index();
-        let seen = self
-            .documents
-            .get(index)
-            .filter(|document| {
-                document
-                    .path()
-                    .is_some_and(|path| path.extension().is_some_and(|e| e == "tex"))
-            })
-            .and_then(|document| document.editor())
-            .map(|editor| (index, editor.edit.focus));
-        let before = std::mem::replace(&mut self.caret_seen, seen);
-        let moved = matches!((before, seen), (Some(a), Some(b)) if a.0 == b.0 && a.1 != b.1);
-        if moved && self.primary_modifier && self.now - self.last_key_at > 0.25 {
-            self.sync_forward();
-            return true;
-        }
-        false
-    }
 
-    /// A double click on a PDF page asks for its source, through SyncTeX.
-    fn poll_pdf_double_click(&mut self) -> bool {
-        // The framework's double press, as a second way in.
-        let mut requested = None;
-        for (index, document) in self.documents.iter_mut().enumerate() {
-            if let Document::Pdf(pdf) = document {
-                if pdf.double_click {
-                    pdf.double_click = false;
-                    requested = Some(index);
-                }
-            }
-        }
 
-        // The editor's own double click, with a hand-sized tolerance.
-        if let Some(pane) = self.pdf_double_click.take() {
-            let index = if pane == 1 {
-                self.split_document
-            } else {
-                Some(self.active)
-            };
-            if index.is_some() {
-                self.focused_pane = pane as usize;
-                self.sync_inverse();
-                return true;
-            }
-        }
-
-        let Some(index) = requested else {
-            return false;
-        };
-        self.focused_pane = if self.split_document == Some(index) {
-            1
-        } else {
-            0
-        };
-        self.sync_inverse();
-        true
-    }
-
-    /// Apply the file-system changes the watcher collected.
-    ///
-    /// A file whose content the editor already has is not a change: that is
-    /// the editor's own save coming back. A file nobody has edited is
-    /// reloaded. A file with unsaved changes is *reported*, never overwritten.
-    fn poll_files(&mut self) -> bool {
-        let Some(watch) = self.watch.as_mut() else {
-            return false;
-        };
-        let changes = watch.drain();
-        if changes.is_empty() {
-            return false;
-        }
-
-        let mut changed = false;
-        for change in changes {
-            // A path can be open twice: once as text and once as a preview.
-            // The text is what reloads; the preview is refreshed after.
-            let index = self
-                .documents
-                .iter()
-                .position(|document| {
-                    document.path() == Some(change.path.as_path()) && document.editor().is_some()
-                })
-                .or_else(|| {
-                    self.documents
-                        .iter()
-                        .position(|document| document.path() == Some(change.path.as_path()))
-                });
-            let Some(index) = index else {
-                // A file in the tree that is not open: refresh the tree.
-                if change.exists {
-                    self.tree = self
-                        .root
-                        .clone()
-                        .map(|root| FileTree::scan(&root, MAX_DEPTH))
-                        .unwrap_or_default();
-                    changed = true;
-                }
-                continue;
-            };
-
-            // A PDF is binary: reading it back as text would call a rebuild a
-            // deletion. The build reloads the view itself; the watcher only
-            // has to forget any earlier report for it.
-            if change.exists && matches!(self.documents.get(index), Some(Document::Pdf(_))) {
-                self.changed_on_disk.retain(|path| path != &change.path);
-                continue;
-            }
-
-            let Some(on_disk) = std::fs::read(&change.path)
-                .ok()
-                .and_then(|bytes| lide_text::TextBuffer::from_bytes(&bytes))
-                .map(|buffer| buffer.to_text())
-            else {
-                // The file is gone.
-                if !self.changed_on_disk.contains(&change.path) {
-                    self.changed_on_disk.push(change.path.clone());
-                }
-                changed = true;
-                continue;
-            };
-
-            let dirty = self.documents[index].is_dirty();
-            let same = self.documents[index]
-                .text()
-                .map(|text| text == on_disk)
-                .unwrap_or(false);
-
-            if same {
-                // The editor's own write, or a rewrite with identical content.
-                self.changed_on_disk.retain(|path| path != &change.path);
-                continue;
-            }
-
-            if dirty {
-                if !self.changed_on_disk.contains(&change.path) {
-                    self.changed_on_disk.push(change.path.clone());
-                }
-                changed = true;
-            } else {
-                let mut reloaded = false;
-                if let Some(editor) = self.documents[index].editor_mut() {
-                    if editor.reload().is_ok() {
-                        self.changed_on_disk.retain(|path| path != &change.path);
-                        changed = true;
-                        reloaded = true;
-                    }
-                }
-                if reloaded {
-                    self.refresh_image_previews(&change.path);
-                }
-            }
-        }
-        changed
-    }
 
     /// Take the text from disk for the active document, discarding what the
     /// editor holds.
@@ -3333,94 +2788,10 @@ fn is_notebook(path: &Path) -> bool {
     )
 }
 
-/// Collect the `.tex` files under `directory`, shallowly.
-fn collect_tex(directory: &Path, found: &mut Vec<PathBuf>, depth: usize) {
-    // Deep and wide enough for a paper project with its listings and
-    // chapters; capped so a huge repository cannot make a save slow.
-    if depth > 4 || found.len() > 128 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            collect_tex(&path, found, depth + 1);
-        } else if path
-            .extension()
-            .map(|extension| extension == "tex")
-            .unwrap_or(false)
-        {
-            found.push(path);
-        }
-    }
-}
 
-/// The `.tex` files that other files do not include: the build roots.
-fn tex_roots(files: &[PathBuf]) -> Vec<PathBuf> {
-    use std::collections::HashSet;
 
-    let mut included = HashSet::new();
-    for file in files {
-        let Ok(text) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        for name in tex_includes(&text) {
-            let mut path = file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(name);
-            if path.extension().is_none() {
-                path.set_extension("tex");
-            }
-            included.insert(fs_key(&path));
-        }
-    }
-    files
-        .iter()
-        .filter(|path| !included.contains(&fs_key(path)))
-        .cloned()
-        .collect()
-}
 
-/// Whether `path` is one of the given roots, whatever spelling the caller
-/// used: the opened file and the walk over the workspace can disagree about
-/// symlinks and a filesystem's canonical case, and they name one file.
-fn is_one_of_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots
-        .iter()
-        .any(|root| root == &path.to_path_buf() || fs_key(root) == fs_key(path))
-}
 
-/// The names in `\input{...}`, `\include{...}` and `\subfile{...}`.
-fn tex_includes(text: &str) -> Vec<&str> {
-    let mut names = Vec::new();
-    for command in ["\\input", "\\include", "\\subfile"] {
-        let mut rest = text;
-        while let Some(index) = rest.find(command) {
-            let after = rest[index + command.len()..].trim_start();
-            if let Some(after) = after.strip_prefix('{') {
-                if let Some(end) = after.find('}') {
-                    let name = after[..end].trim();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
-                }
-            }
-            rest = &rest[index + command.len()..];
-        }
-    }
-    names
-}
-
-fn fs_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
 
 /// The project a file belongs to.
 ///

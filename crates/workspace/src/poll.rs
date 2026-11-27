@@ -9,7 +9,11 @@
 //! subprocess or a watcher, and they change nothing but the state they
 //! report.
 
-use super::{Document, Workspace};
+use std::path::PathBuf;
+
+use super::servers::Outcome;
+use super::tree::FileTree;
+use super::{Document, SidebarMode, Workspace, COMPLETION_DEBOUNCE, MAX_DEPTH};
 
 impl Workspace {
     /// Collect the pages the PDF viewer rendered in the background, the files
