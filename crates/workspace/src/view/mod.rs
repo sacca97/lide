@@ -1,4 +1,4 @@
-use rune::{col, icon, row, text, Cx, El, Tx};
+use rune::{col, el, icon, row, text, Cx, El, Tx};
 use rune_kit::{root, Kit};
 
 use crate::{kit, Workspace, CARD_GAP};
@@ -53,25 +53,39 @@ pub fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             ),
     );
 
-    let body = col()
-        .w_full()
-        .h_full()
-        .fill(k.c.bg_deep)
-        .child(main)
-        .child(
-            col()
+    let mut body = col().w_full().h_full().fill(k.c.bg_deep);
+    // A custom titlebar (macOS) puts the window's own buttons over the content.
+    // The band above everything keeps them clear and is what drags the window.
+    // Full screen hides the buttons, so it needs no band.
+    let insets = cx.chrome_insets();
+    let titlebar = if insets.leading + insets.trailing > 0.0 {
+        insets.height
+    } else {
+        0.0
+    };
+    if titlebar > 0.0 {
+        body = body.child(
+            el()
+                .key("window-titlebar")
                 .w_full()
-                .padding(CARD_GAP)
-                .child(
-                    col()
-                        .w_full()
-                        .radius(8.0)
-                        .clip_rounded(8.0)
-                        .border(1.0, k.c.border_base)
-                        .fill(k.c.bg_base)
-                        .child(status_bar(s, k)),
-                ),
+                .h(titlebar)
+                .window_drag(),
         );
+    }
+    let body = body.child(main).child(
+        col()
+            .w_full()
+            .padding(CARD_GAP)
+            .child(
+                col()
+                    .w_full()
+                    .radius(8.0)
+                    .clip_rounded(8.0)
+                    .border(1.0, k.c.border_base)
+                    .fill(k.c.bg_base)
+                    .child(status_bar(s, k)),
+            ),
+    );
 
     // An invisible run of characters in the editor's font, measured from the
     // previous layout to find the width of one character.

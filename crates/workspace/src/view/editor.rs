@@ -3,7 +3,7 @@ use std::path::Path;
 use rune::{col, el, icon, row, text, text_input, Cx, El, Live, ScrollPos, ScrollSpec, Tx, WheelEvent};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 use rune_kit::syntax::{highlight, lang_for_path, SyntaxTheme};
-use rune_kit::{Button, ControlSize, Kit, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use crate::view::terminal::terminal_view;
 use crate::view::{empty_note, icon_button};
@@ -115,7 +115,9 @@ pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {
     if preview {
         strip = strip.child(
             Button::new("Preview")
+                .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Mini)
+                .icon(&crate::icons::EYE)
                 .help("Open the built PDF beside the source without building")
                 .on_press(|s: &mut Workspace| s.open_pdf_beside_source())
                 .build(k)
@@ -123,18 +125,6 @@ pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {
         );
     }
     if s.split_document.is_some() {
-        strip = strip.child(
-            Button::new(if s.focused_pane == 0 {
-                "Left pane"
-            } else {
-                "Right pane"
-            })
-            .control_size(ControlSize::Mini)
-            .help("Tabs open in this pane; click to switch")
-            .on_press(|s: &mut Workspace| s.focus_other_pane())
-            .build(k)
-            .key("focus-pane"),
-        );
         strip = strip.child(
             icon_button(&crate::icons::X, "Close split", k)
                 .on_press(|s: &mut Workspace| s.toggle_split()),
@@ -456,6 +446,9 @@ fn document_view(
         Document::Text(editor) => editor_view(editor, s, k, cx, pane, advance),
         Document::Markdown { editor, .. } => markdown_view(editor, s, k, cx, pane, advance),
         Document::Pdf(pdf) => {
+            // Tell the viewer how dense this display is, so page bitmaps are
+            // rendered sharp instead of at one pixel per point.
+            pdf.set_display_scale(cx.env().scale);
             s.pdf_widths[pane].set(cx.layout(&format!("pdf-scroll-{pane}")).map(|r| r[2]).unwrap_or(0.0));
             pdf.view(
             k,
@@ -1100,8 +1093,10 @@ pub(crate) fn build_panel(s: &Workspace, k: &Kit) -> El {
 
     let mut lines = col().w_full().gap(0.0);
 
-    // The errors first, each one a jump to the line that caused it.
-    for error in build.errors().iter().take(8) {
+    // The errors first, each one a jump to the line that caused it. The key
+    // carries the index, because a document can report two problems on one
+    // line and a duplicated key would make one row unclickable.
+    for (index, error) in build.errors().iter().take(8).enumerate() {
         let name = error
             .path
             .strip_prefix(s.root.as_deref().unwrap_or(std::path::Path::new("")))
@@ -1112,7 +1107,7 @@ pub(crate) fn build_panel(s: &Workspace, k: &Kit) -> El {
         let line = error.line;
         lines = lines.child(
             row()
-                .key(format!("build-error-{name}-{line}"))
+                .key(format!("build-error-{name}-{line}-{index}"))
                 .w_full()
                 .gap(8.0)
                 .radius(3.0)

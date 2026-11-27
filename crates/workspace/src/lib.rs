@@ -532,6 +532,118 @@ fn refine_line(text: &str, line: u64, column: usize, words: &(String, String, St
 }
 
 impl Workspace {
+    /// Pick the source line a click on the PDF came from, among the lines near
+    /// the one SyncTeX named.
+    ///
+    /// SyncTeX's edit query answers with a single node, and its boxes are
+    /// narrower than the glyphs they cover, so a click on the last words of a
+    /// line can come back as the next line down. The click itself says better:
+    /// among the candidate lines, the one whose text holds the clicked word
+    /// and whose own SyncTeX position on the clicked page is nearest the
+    /// click's height wins. `y_top` is the click's height in points from the
+    /// top of the page, `page` the zero-based page.
+    fn pick_source_line(
+        &self,
+        synctex: &lide_latex::SyncTex,
+        pdf: &Path,
+        page: u32,
+        y_top: f32,
+        source: &lide_latex::SyncSource,
+        words: Option<&(String, String, String)>,
+    ) -> (u64, usize) {
+        let fallback = (source.line, source.column as usize);
+        let Some(text) = self.source_text(&source.path) else {
+            return fallback;
+        };
+        let needles: Vec<String> = match words {
+            Some((before, word, after)) => [
+                format!("{before}{word}{after}"),
+                format!("{before}{word}"),
+                format!("{word}{after}"),
+                word.clone(),
+            ]
+            .into_iter()
+            .filter(|needle| needle.chars().count() >= 3)
+            .collect(),
+            None => Vec::new(),
+        };
+
+        // Candidate lines: every line holding the clicked phrase, wherever it
+        // is in the file — SyncTeX's single answer can be a section away when
+        // its boxes do not cover the glyphs that were clicked — capped to the
+        // ones nearest its answer to bound the query. Without a clicked word,
+        // just the lines near its answer.
+        let folded: Vec<(u64, String)> = text
+            .lines()
+            .enumerate()
+            .map(|(index, line)| (index as u64 + 1, lide_pdf::view::fold_text(line)))
+            .collect();
+        let near = |n: u64| {
+            n >= source.line.saturating_sub(8).max(1) && n <= source.line + 8
+        };
+        let mut candidates: Vec<u64> = if needles.is_empty() {
+            folded.iter().map(|(n, _)| *n).filter(|n| near(*n)).collect()
+        } else {
+            folded
+                .iter()
+                .filter(|(_, f)| needles.iter().any(|needle| f.contains(needle.as_str())))
+                .map(|(n, _)| *n)
+                .collect()
+        };
+        if candidates.is_empty() {
+            candidates = folded.iter().map(|(n, _)| *n).filter(|n| near(*n)).collect();
+        }
+        candidates.sort_by_key(|n| n.abs_diff(source.line));
+        candidates.truncate(64);
+        if candidates.is_empty() {
+            return fallback;
+        }
+
+        // Score each candidate by the height of its own SyncTeX position on
+        // the clicked page; the nearest line to SyncTeX's answer breaks ties.
+        let positions = synctex.forward_many(&source.path, &candidates, pdf).unwrap_or_default();
+        let mut best: Option<(u64, f32, u64)> = None;
+        for (n, position) in &positions {
+            let distance = position
+                .as_ref()
+                .filter(|point| point.page == page + 1)
+                .map(|point| (point.y - y_top).abs())
+                .unwrap_or(f32::MAX);
+            let line_distance = n.abs_diff(source.line);
+            let better = match &best {
+                None => true,
+                Some((_, best_distance, best_line_distance)) => {
+                    distance < *best_distance
+                        || (distance == *best_distance && line_distance < *best_line_distance)
+                }
+            };
+            if better {
+                best = Some((*n, distance, line_distance));
+            }
+        }
+        let Some((line, distance, _)) = best else {
+            return fallback;
+        };
+        if distance == f32::MAX {
+            // No candidate has a position on this page: the text alone decides.
+            return match words {
+                Some(words) => refine_line(&text, source.line, source.column as usize, words),
+                None => fallback,
+            };
+        }
+        let column = words
+            .filter(|(_, word, _)| !word.is_empty())
+            .and_then(|(_, word, _)| {
+                text.lines()
+                    .nth(line.saturating_sub(1) as usize)
+                    .and_then(|raw| raw.to_lowercase().find(word.as_str()))
+            })
+            .unwrap_or(source.column as usize);
+        (line, column)
+    }
+}
+
+impl Workspace {
     /// An empty workspace.
     pub fn new() -> Self {
         Self::default()
@@ -969,6 +1081,10 @@ impl Workspace {
                 let pdf = build.options.pdf_path();
                 let tex = build.options.tex_path();
                 if pdf.exists() {
+                    // The preview is reloaded before it is focused: the build
+                    // wrote a new file, and an open view still holds the old
+                    // pages and text.
+                    self.reload_pdf_previews(&pdf);
                     self.show_pdf_beside(&tex, &pdf);
                 }
             } else {
@@ -1295,6 +1411,32 @@ impl Workspace {
         }
     }
 
+    /// Save a document the way an explicit Save does: a `.tex` file is built
+    /// even when there was nothing to write.
+    ///
+    /// The shortcut is the save-and-typeset key, so pressing it after opening
+    /// a document, or on one that already matches disk, still compiles. A
+    /// save that failed leaves the document dirty and schedules nothing.
+    pub fn save_and_build(&mut self, index: usize) {
+        self.save(index);
+        if self.latex_build_after_save {
+            return;
+        }
+        let is_tex = self
+            .documents
+            .get(index)
+            .and_then(|document| document.path())
+            .and_then(Path::extension)
+            .is_some_and(|extension| extension == "tex");
+        let clean = self
+            .documents
+            .get(index)
+            .is_some_and(|document| !document.is_dirty());
+        if is_tex && clean {
+            self.latex_build_after_save = true;
+        }
+    }
+
     /// Reopen every image view of `path`, so that it decodes the bytes on disk
     /// again. Used when the source of an SVG (or its file) changed.
     fn refresh_image_previews(&mut self, path: &Path) {
@@ -1305,6 +1447,19 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Reopen every PDF view of `path`, so a rebuilt document shows its new
+    /// pages instead of the ones it had when it was opened.
+    fn reload_pdf_previews(&mut self, path: &Path) {
+        for document in &mut self.documents {
+            if let Document::Pdf(pdf) = document {
+                if pdf.path() == path {
+                    let _ = pdf.reload();
+                }
+            }
+        }
+        self.changed_on_disk.retain(|changed| changed != path);
     }
 
     /// Show the source of an image, or the preview of the source.
@@ -1571,8 +1726,7 @@ impl Workspace {
                 if let Some(Document::Pdf(view)) = self.documents.get_mut(pdf_index) {
                     let page = point.page.saturating_sub(1);
                     let height = view.page_height(page).unwrap_or(792.0);
-                    view.go_to_page(page);
-                    // SyncTeX's y is measured from the top; the viewer's
+                    view.go_to_page(page);                    // SyncTeX's y is measured from the top; the viewer's
                     // pointer and text layer use the PDF's bottom-left origin.
                     view.pointer = Some((point.x, (height - point.y).max(0.0)));
                     // SyncTeX is exact to the line of the page; the words of the
@@ -1681,15 +1835,28 @@ impl Workspace {
         let synctex = lide_latex::SyncTex::new(pdf.parent().unwrap_or(std::path::Path::new(".")));
         match synctex.inverse(&pdf, page + 1, x, y) {
             Ok(Some(source)) => {
-                self.show_pdf_beside(&source.path, &pdf);
-                // SyncTeX names the line of the page's text; the clicked word
-                // says which of the nearby source lines it was.
-                let (line, column) = match (&words, self.source_text(&source.path)) {
-                    (Some(words), Some(text)) => {
-                        refine_line(&text, source.line, source.column as usize, words)
-                    }
-                    _ => (source.line, source.column as usize),
+                // The sidecar may spell the source through a symlink (macOS's
+                // /var for /private/var); if the file is already open under the
+                // workspace's spelling, use that, so the open tab is focused
+                // instead of a second copy opening.
+                let source = lide_latex::SyncSource {
+                    path: self
+                        .documents
+                        .iter()
+                        .find_map(|document| {
+                            document
+                                .path()
+                                .filter(|path| fs_key(path) == fs_key(&source.path))
+                                .map(Path::to_path_buf)
+                        })
+                        .unwrap_or(source.path),
+                    ..source
                 };
+                self.show_pdf_beside(&source.path, &pdf);
+                // SyncTeX names one line of the page's text; the clicked word
+                // and the clicked row say which of the nearby lines it was.
+                let (line, column) =
+                    self.pick_source_line(&synctex, &pdf, page, y, &source, words.as_ref());
                 if let Some(editor) = self.active_editor_mut() {
                     editor.go_to(line, column);
                 }
@@ -1858,7 +2025,13 @@ impl Workspace {
         collect_tex(root, &mut found, 0);
         found.sort();
         let roots = tex_roots(&found);
-        if let Some(active) = active.as_ref().filter(|path| roots.contains(path)) {
+        // The user opened the file and the tree walks the workspace, so the
+        // two spellings of the same path can differ (a symlink, macOS's
+        // canonical case). Same file means the same document.
+        if let Some(active) = active
+            .as_ref()
+            .filter(|path| is_one_of_roots(path, &roots))
+        {
             return Some(active.clone());
         }
         roots
@@ -2199,7 +2372,11 @@ impl Workspace {
         changed |= self.poll_completions();
         changed |= self.poll_replace();
         changed |= self.poll_remote_open();
-        if self.latex_build_after_save {
+        // A save during a build is not lost: the request waits for the running
+        // build to finish, then rebuilds with what was saved.
+        if self.latex_build_after_save
+            && self.build.as_ref().is_none_or(|build| build.finished)
+        {
             self.latex_build_after_save = false;
             self.build_latex();
             changed = true;
@@ -2956,6 +3133,14 @@ impl Workspace {
                 continue;
             };
 
+            // A PDF is binary: reading it back as text would call a rebuild a
+            // deletion. The build reloads the view itself; the watcher only
+            // has to forget any earlier report for it.
+            if change.exists && matches!(self.documents.get(index), Some(Document::Pdf(_))) {
+                self.changed_on_disk.retain(|path| path != &change.path);
+                continue;
+            }
+
             let Some(on_disk) = std::fs::read(&change.path)
                 .ok()
                 .and_then(|bytes| lide_text::TextBuffer::from_bytes(&bytes))
@@ -3150,7 +3335,9 @@ fn is_notebook(path: &Path) -> bool {
 
 /// Collect the `.tex` files under `directory`, shallowly.
 fn collect_tex(directory: &Path, found: &mut Vec<PathBuf>, depth: usize) {
-    if depth > 3 || found.len() > 32 {
+    // Deep and wide enough for a paper project with its listings and
+    // chapters; capped so a huge repository cannot make a save slow.
+    if depth > 4 || found.len() > 128 {
         return;
     }
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -3199,6 +3386,15 @@ fn tex_roots(files: &[PathBuf]) -> Vec<PathBuf> {
         .filter(|path| !included.contains(&fs_key(path)))
         .cloned()
         .collect()
+}
+
+/// Whether `path` is one of the given roots, whatever spelling the caller
+/// used: the opened file and the walk over the workspace can disagree about
+/// symlinks and a filesystem's canonical case, and they name one file.
+fn is_one_of_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| root == &path.to_path_buf() || fs_key(root) == fs_key(path))
 }
 
 /// The names in `\input{...}`, `\include{...}` and `\subfile{...}`.
@@ -3518,6 +3714,78 @@ mod tests {
         assert!(
             !workspace.latex_build_after_save,
             "saving an unchanged .tex does not schedule another build"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_explicit_save_builds_a_clean_tex_file_but_not_a_text_file() {
+        let directory =
+            std::env::temp_dir().join(format!("lide-save-and-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let tex = directory.join("main.tex");
+        let notes = directory.join("notes.txt");
+        std::fs::write(&tex, "\\documentclass{article}\n").unwrap();
+        std::fs::write(&notes, "hello\n").unwrap();
+
+        let mut workspace = Workspace::new();
+        workspace.open_folder(&directory).expect("the folder opens");
+        workspace.open_path(&tex).expect("the .tex file opens");
+        let index = workspace.active;
+        assert!(!workspace.documents[index].is_dirty());
+
+        // Cmd+S is save-and-typeset: an unchanged .tex still builds.
+        workspace.save_and_build(index);
+        assert!(
+            workspace.latex_build_after_save,
+            "an explicit save builds a clean .tex"
+        );
+
+        workspace.latex_build_after_save = false;
+        workspace.open_path(&notes).expect("the text file opens");
+        let index = workspace.active;
+        workspace.save_and_build(index);
+        assert!(
+            !workspace.latex_build_after_save,
+            "saving a .txt does not build LaTeX"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_document_being_edited_is_what_a_build_targets() {
+        let directory =
+            std::env::temp_dir().join(format!("lide-build-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        // Many unrelated root documents, so a wrong choice is loud: the save
+        // must build the paper being edited, not the first root in the tree.
+        let extra = directory.join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        for index in 0..40 {
+            let name = extra.join(format!("chapter{:02}.tex", index));
+            std::fs::write(&name, "\\documentclass{article}\n").unwrap();
+        }
+        let paper = directory.join("paper");
+        std::fs::create_dir_all(&paper).unwrap();
+        let tex = paper.join("paper.tex");
+        std::fs::write(
+            &tex,
+            "\\documentclass{acmart}\n\\begin{document}\nBlueBrothers\n\\end{document}\n",
+        )
+        .unwrap();
+
+        let mut workspace = Workspace::new();
+        workspace.open_folder(&directory).expect("the folder opens");
+        workspace.open_path(&tex).expect("paper.tex opens");
+
+        let target = workspace.latex_document().expect("a document to build");
+        assert!(
+            target.ends_with("paper.tex"),
+            "the file being edited is what a save builds, not {target:?}"
         );
 
         let _ = std::fs::remove_dir_all(&directory);

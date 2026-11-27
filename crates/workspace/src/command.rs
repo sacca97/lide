@@ -631,7 +631,7 @@ pub fn run(command: Command, workspace: &mut Workspace) {
     match command {
         Command::Save => {
             let active = workspace.active;
-            workspace.save(active);
+            workspace.save_and_build(active);
         }
         Command::SaveAll => workspace.save_all(),
         Command::CloseTab => {

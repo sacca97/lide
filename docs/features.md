@@ -26,9 +26,9 @@ verified.
   chevron hides the whole bar; the same controls bring it back.
 - Flat tab strip with dirty markers and close buttons; two split panes, each
   with its own document and a draggable divider. Clicking a tab opens it in
-  the pane chosen by the **Left pane / Right pane** switch, dragging a tab
-  onto the other pane moves it there, and the **X** beside those controls
-  closes the split. The focused pane carries an accent rule.
+  the left pane; the palette's **Focus the other pane** switches which pane a
+  tab opens into, dragging a tab onto the other pane moves it there, and the
+  **X** in the strip closes the split. The focused pane carries an accent rule.
 - Neutral status bar with branch, problems, language, cursor, size and server.
 - Light and dark themes; settings persist in `$XDG_CONFIG_HOME/lide/settings.json`
   (override with `LIDE_CONFIG_DIR`).
@@ -145,10 +145,12 @@ not recognised report an error rather than being guessed at.
 - Streaming output panel; `texres`'s `error:` / `--> path:line:column` blocks
   and the classic `path:line:` / `! … / l.N` forms are clickable.
 - A successful build opens the PDF **beside the source** (the source stays in
-  the left pane and the PDF takes the right). The tab strip's **Preview**
-  button opens an existing PDF without building; the palette command does the
-  same. **Builds only when a changed `.tex` file is saved** (no timers, no
-  watcher rebuilds), plus the explicit `Ctrl+Shift+B`.
+  the left pane and the PDF takes the right), and an already open preview is
+  reloaded when the build writes a new PDF. The tab strip's **Preview** button
+  opens an existing PDF without building; the palette command does the same.
+  **`Ctrl+S` saves and builds the active `.tex`** even when the file has no
+  changes, and any changed `.tex` builds when it is saved (no timers, no
+  watcher rebuilds). `Ctrl+Shift+B` builds explicitly.
 - Forward SyncTeX (source line → PDF page) and inverse (PDF point → source),
   read directly from the `.synctex.gz` the build already writes; no separate
   `synctex` executable is needed. Double-click a point on the PDF to go to the
@@ -189,7 +191,7 @@ clipboard, while `Ctrl+C` still sends the shell an interrupt.
 | `Ctrl+Shift+P` | Command palette |
 | `Ctrl+P` / `Ctrl+N` | Move the palette's highlight |
 | `Enter` / `Esc` | Run / close the palette, dialog or bar |
-| `Ctrl+S` / `Ctrl+Shift+S` | Save / save all |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save (and build the active `.tex`) / save all |
 | `Ctrl+W` | Close tab |
 | `Ctrl+R` | Reload from disk |
 | `Ctrl+N` | New file (outside the palette) |

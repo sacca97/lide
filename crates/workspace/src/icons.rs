@@ -7,7 +7,7 @@
 use rune::Icon;
 
 pub use rune_kit::glyphs::{
-    CHEVRON_DOWN, CLOSE, FILE, FILE_CODE, FILE_IMAGE, FILE_TEXT, FOLDER, FOLDER_OPEN, SEARCH,
+    CHEVRON_DOWN, CLOSE, EYE, FILE, FILE_CODE, FILE_IMAGE, FILE_TEXT, FOLDER, FOLDER_OPEN, SEARCH,
 };
 
 /// Two stacked sheets: the explorer.

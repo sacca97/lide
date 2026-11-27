@@ -89,6 +89,10 @@ pub struct PdfView {
     page: u32,
     /// The zoom factor the page is drawn at.
     scale: f32,
+    /// Device pixels per window point. A page is rendered at
+    /// `scale * display_scale` pixels per point, so a bitmap is as dense as
+    /// the display it is drawn on and stays sharp on a Retina screen.
+    display_scale: std::cell::Cell<f32>,
     /// Whether the page is fitted to the pane's width. A zoom by hand turns
     /// it off.
     fit: bool,
@@ -181,6 +185,7 @@ impl PdfView {
             path,
             page: 0,
             scale: 1.0,
+            display_scale: std::cell::Cell::new(1.0),
             fit: true,
             image_scale: 1.0,
             image: None,
@@ -212,6 +217,52 @@ impl PdfView {
         // background.
         view.render_first_page();
         Ok(view)
+    }
+
+    /// Reopen the file from disk, keeping the page and zoom.
+    ///
+    /// A LaTeX build writes a new PDF over the one the viewer has open, so the
+    /// pages, text layer, outline and render thread all belong to the old
+    /// bytes. The page is kept when the new document still has it.
+    pub fn reload(&mut self) -> Result<(), PdfError> {
+        let page = self.page;
+        let scale = self.scale;
+        let fit = self.fit;
+        let display = self.display_scale.get();
+        let search = std::mem::replace(&mut self.search, TextEdit::new(""));
+        let query = search.text.clone();
+
+        let mut fresh = Self::open(&self.path)?;
+        fresh.page = page.min(fresh.page_count().saturating_sub(1));
+        fresh.scale = scale;
+        fresh.fit = fit;
+        fresh.display_scale = std::cell::Cell::new(display);
+        fresh.search = search;
+        fresh.render_first_page();
+        *self = fresh;
+
+        if !query.is_empty() {
+            self.search_for(&query);
+        }
+        Ok(())
+    }
+
+    /// Tell the viewer how dense the display is, in pixels per point.
+    ///
+    /// The view runs this every frame; a move to another display (or a zoom
+    /// of the desktop) makes the next page render come back at the new
+    /// density. Until it does, the previous bitmap still draws.
+    pub fn set_display_scale(&self, scale: f32) {
+        let scale = if scale.is_finite() && scale > 1.0 { scale } else { 1.0 };
+        if (self.display_scale.get() - scale).abs() > 0.01 {
+            self.display_scale.set(scale);
+        }
+    }
+
+    /// The density a page bitmap is rendered at: the zoom times the display's
+    /// pixels per point, so a page is as sharp as the screen allows.
+    fn render_scale(&self) -> f32 {
+        (self.scale * self.display_scale.get()).clamp(MIN_SCALE, 32.0)
     }
 
     /// The path the document was opened from.
@@ -435,15 +486,16 @@ impl PdfView {
 
         // Show the current page as soon as it is available, whether it was
         // just rendered or was rendered earlier.
-        if self.shown != Some((self.page, self.scale)) {
+        let scale = self.render_scale();
+        if self.shown != Some((self.page, scale)) {
             if let Some(cached) = self
                 .rendered
                 .iter()
-                .find(|cached| cached.page == self.page && cached.scale == self.scale)
+                .find(|cached| cached.page == self.page && cached.scale == scale)
             {
                 self.image = Some(cached.image.clone());
                 self.image_scale = cached.scale;
-                self.shown = Some((self.page, self.scale));
+                self.shown = Some((self.page, scale));
                 changed = true;
             }
         }
@@ -500,7 +552,8 @@ impl PdfView {
         let Ok(document) = engine.open(&self.path) else {
             return;
         };
-        let Ok(page) = document.render_page(self.page, self.scale) else {
+        let scale = self.render_scale();
+        let Ok(page) = document.render_page(self.page, scale) else {
             return;
         };
         // The text layer comes with the first page too, so that searching works
@@ -511,8 +564,8 @@ impl PdfView {
         // The outline comes with the first page too, so that navigation is
         // there before anything else has been asked for.
         self.outline = document.outline();
-        self.pending = Some((self.scale, (page.width, page.height, page.rgba)));
-        self.requested = Some((self.page, self.scale));
+        self.pending = Some((scale, (page.width, page.height, page.rgba)));
+        self.requested = Some((self.page, scale));
     }
 
     /// Ask the rendering thread for the current page.
@@ -520,14 +573,15 @@ impl PdfView {
     /// The channel holds a single request, so a burst of zoom steps collapses
     /// into the scale that is on screen when the renderer is ready for it.
     fn request_page(&mut self) {
-        let target = (self.page, self.scale);
+        let scale = self.render_scale();
+        let target = (self.page, scale);
         if self.requested == Some(target) {
             return;
         }
         if self
             .rendered
             .iter()
-            .any(|cached| cached.page == self.page && cached.scale == self.scale)
+            .any(|cached| cached.page == self.page && cached.scale == scale)
         {
             return;
         }
@@ -537,7 +591,7 @@ impl PdfView {
         if sender
             .try_send(RenderRequest {
                 page: self.page,
-                scale: self.scale,
+                scale,
             })
             .is_ok()
         {
@@ -1158,20 +1212,32 @@ pub fn words_around_index(chars: &[TextChar], at: usize) -> (String, String, Str
 /// wins, with the vertical distance weighted so that being on the right line
 /// matters more than being at the right column — which is what makes a drag
 /// down the margin select whole lines rather than jump about.
+///
+/// PDFium reports spaces and line breaks as zero-area boxes sitting exactly on
+/// the baseline; their centres are vertically closer to a click on the text
+/// than any real glyph's, so in the vote they would always win and the click
+/// would land on whitespace. Only characters with a measurable box are
+/// candidates, with every character as a fallback for a page with no glyphs.
 pub fn char_at(chars: &[TextChar], x: f32, y: f32) -> Option<usize> {
     if chars.is_empty() {
         return None;
     }
-    if let Some(index) = chars
-        .iter()
-        .position(|c| x >= c.left && x <= c.right && y >= c.bottom && y <= c.top)
-    {
+    let is_glyph = |c: &TextChar| c.right > c.left && c.top > c.bottom;
+    let glyphs: Vec<usize> = (0..chars.len()).filter(|&i| is_glyph(&chars[i])).collect();
+    let all: Vec<usize> = (0..chars.len()).collect();
+    let candidates: &[usize] = if glyphs.is_empty() { &all } else { &glyphs };
+
+    if let Some(index) = candidates.iter().copied().find(|&i| {
+        let c = &chars[i];
+        x >= c.left && x <= c.right && y >= c.bottom && y <= c.top
+    }) {
         return Some(index);
     }
 
     let mut best: Option<usize> = None;
     let mut best_score = f32::MAX;
-    for (index, character) in chars.iter().enumerate() {
+    for &index in candidates {
+        let character = &chars[index];
         let centre_x = (character.left + character.right) / 2.0;
         let centre_y = (character.bottom + character.top) / 2.0;
         let score = (centre_y - y).abs() * 10.0 + (centre_x - x).abs();

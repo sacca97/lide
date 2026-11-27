@@ -70,6 +70,35 @@ fn the_workspace_renders() {
     assert!(distinct_colours(&path) > 4096);
 }
 
+/// The macOS traffic lights get their own band: with `--chrome` the headless
+/// renderer reports every element that comes within four points of them.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_window_buttons_do_not_overlap_the_content() {
+    let directory = std::env::temp_dir().join("lide-snapshots");
+    std::fs::create_dir_all(&directory).expect("the snapshot directory should be creatable");
+    let path = directory.join("chrome.png");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lide"))
+        .args(["--chrome", "--snap"])
+        .arg(&path)
+        .arg("crates/text/src/buffer.rs")
+        .output()
+        .expect("the editor should run");
+
+    assert!(
+        output.status.success(),
+        "the editor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("0 overlapping elements"),
+        "the traffic lights need their own band: {stderr}"
+    );
+    assert!(path.exists(), "no snapshot was written to {}", path.display());
+}
+
 #[test]
 fn a_text_document_renders() {
     let path = snapshot("editor", &["crates/text/src/buffer.rs"]);

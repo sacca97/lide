@@ -16,6 +16,12 @@ use scenes::SCENES;
 /// The application identifier, used as the window class.
 const APP_ID: &str = "lide";
 
+/// The strip macOS keeps clear at the top for its three window buttons. The
+/// content view fills the window, so the editor reserves this band instead of
+/// starting under the traffic lights.
+#[cfg(target_os = "macos")]
+const TITLEBAR_HEIGHT: f32 = 30.0;
+
 /// What the editor should open at startup.
 #[derive(Debug, Default)]
 struct Startup {
@@ -119,7 +125,7 @@ fn main() -> anyhow::Result<()> {
 
     spec.on_key = Some(lide_workspace::keys::handle);
 
-    rune::App::new(spec)
+    let app = rune::App::new(spec)
         .modifier_keys()
         // The modifier state is needed for a Cmd-click on a source line, and
         // the window hears it whatever has the focus.
@@ -127,8 +133,16 @@ fn main() -> anyhow::Result<()> {
             |workspace: &mut Workspace, mods: rune::Mods, _tx: &mut rune::Tx| {
                 workspace.set_primary_modifier(mods.primary() || mods.ctrl);
             },
-        )
-        .run();
+        );
+
+    // On macOS the content view fills the window under a transparent titlebar.
+    // Declaring a titlebar puts the traffic lights in its band and tells the
+    // view how much room to leave them (`Cx::chrome_insets`); other platforms
+    // keep their native frame.
+    #[cfg(target_os = "macos")]
+    let app = app.titlebar(rune::Titlebar::new(TITLEBAR_HEIGHT));
+
+    app.run();
     Ok(())
 }
 

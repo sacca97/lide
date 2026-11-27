@@ -139,7 +139,7 @@ conflict views.
 | Build recipes and engine selection | done: `texres` by default, with `-pdf`, `-xelatex` or `-lualatex` when a document needs an explicit engine; the palette cycles the engine and the choice is remembered |
 | Build directory and auxiliary files | done: "LaTeX: output directory" sets `latex_output_directory`; the build passes `-output-directory DIR`, and the PDF and SyncTeX file go there |
 | BibTeX and Biber | done through `texres`, which runs the bibliography tool the document asks for |
-| Build on save | done: saving a changed `.tex` file schedules its build for the next frame; an unchanged save is a no-op, and there is no timer or watcher-driven rebuild |
+| Build on save | done: saving a changed `.tex` file schedules its build for the next frame, `Ctrl+S` on a `.tex` builds even when nothing changed, and an open PDF preview reloads when a build finishes; there is no timer or watcher-driven rebuild |
 
 The build runner is a general "program, arguments, directory" runner with
 `texres` as the LaTeX command, which is what makes it testable on a machine

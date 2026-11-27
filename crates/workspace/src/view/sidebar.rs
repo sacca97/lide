@@ -215,7 +215,7 @@ fn problems_panel(s: &Workspace, k: &Kit) -> El {
         list = list.child(empty_note("No problems reported", k));
     }
 
-    for diagnostic in all.iter().take(300) {
+    for (index, diagnostic) in all.iter().take(300).enumerate() {
         let (colour, label) = match diagnostic.severity {
             lide_lsp::Severity::Error => (k.c.danger.fg, "error"),
             lide_lsp::Severity::Warning => (k.c.warning.fg, "warning"),
@@ -235,7 +235,7 @@ fn problems_panel(s: &Workspace, k: &Kit) -> El {
         list = list.child(
             col()
                 .key(format!(
-                    "problem-{name}-{line}-{}",
+                    "problem-{name}-{line}-{}-{index}",
                     diagnostic.start.character
                 ))
                 .w_full()

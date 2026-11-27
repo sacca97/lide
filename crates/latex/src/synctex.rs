@@ -121,6 +121,106 @@ impl SyncTex {
         column: u64,
         pdf: &Path,
     ) -> Result<Option<SyncPoint>, String> {
+        // The `Input:` line records the path as the build spelled it, which can
+        // differ from the workspace's own spelling: pdflatex writes a relative
+        // `./main.tex`, and macOS's temporary directory is a symlink, so the
+        // canonical path starts with /private. The parser matches names
+        // textually, so try the spellings in turn: as given, canonicalised,
+        // then the bare file name.
+        let mut names = vec![tex.to_path_buf()];
+        if let Ok(canonical) = std::fs::canonicalize(tex) {
+            if !names.contains(&canonical) {
+                names.push(canonical);
+            }
+        }
+        if let Some(file) = tex.file_name().map(PathBuf::from) {
+            if !names.contains(&file) {
+                names.push(file);
+            }
+        }
+        for name in &names {
+            if let Some(point) = self.forward_named(name, line, column, pdf)? {
+                return Ok(Some(point));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Where each of `lines` of `tex` lands on `pdf`, in one pass over the
+    /// sidecar. The path spellings are tried as in [`Self::forward`]; the
+    /// spelling that answers the most lines wins.
+    pub fn forward_many(
+        &self,
+        tex: &Path,
+        lines: &[u64],
+        pdf: &Path,
+    ) -> Result<Vec<(u64, Option<SyncPoint>)>, String> {
+        let mut names = vec![tex.to_path_buf()];
+        if let Ok(canonical) = std::fs::canonicalize(tex) {
+            if !names.contains(&canonical) {
+                names.push(canonical);
+            }
+        }
+        if let Some(file) = tex.file_name().map(PathBuf::from) {
+            if !names.contains(&file) {
+                names.push(file);
+            }
+        }
+        let handle = self.open(pdf)?;
+        // The spelling that answers the most lines wins: results and its count.
+        type Answers = Vec<(u64, Option<SyncPoint>)>;
+        let mut best: Option<(Answers, usize)> = None;
+        for name in &names {
+            let c_name = c_path(name)?;
+            let mut results = Vec::with_capacity(lines.len());
+            let mut found = 0usize;
+            // SAFETY: the scanner and the name are valid for these calls, and
+            // each node is read before the next query.
+            for &line in lines {
+                let point = unsafe {
+                    let count = synctex_display_query(
+                        handle.0,
+                        c_name.as_ptr(),
+                        line.min(i32::MAX as u64) as c_int,
+                        0,
+                        -1,
+                    );
+                    if count <= 0 {
+                        None
+                    } else {
+                        let node = synctex_scanner_next_result(handle.0);
+                        if node.is_null() {
+                            None
+                        } else {
+                            found += 1;
+                            Some(SyncPoint {
+                                page: synctex_node_page(node).max(1) as u32,
+                                x: synctex_node_visible_h(node),
+                                y: synctex_node_visible_v(node),
+                            })
+                        }
+                    }
+                };
+                results.push((line, point));
+            }
+            if best.as_ref().is_none_or(|(_, best_found)| found > *best_found) {
+                best = Some((results, found));
+            }
+            if found == lines.len() {
+                break;
+            }
+        }
+        Ok(best.map(|(results, _)| results).unwrap_or_default())
+    }
+
+    /// [`Self::forward`] for one spelling of the source path.
+    fn forward_named(
+        &self,
+        tex: &Path,
+        line: u64,
+        column: u64,
+        pdf: &Path,
+    ) -> Result<Option<SyncPoint>, String> {
         let handle = self.open(pdf)?;
         let name = c_path(tex)?;
         // SAFETY: the scanner and the name are valid for these calls, and the
@@ -174,13 +274,29 @@ impl SyncTex {
                 return Ok(None);
             }
             let name = PathBuf::from(CStr::from_ptr(name).to_string_lossy().into_owned());
-            let path = if name.is_absolute() {
-                name
+            let absolute = name.is_absolute();
+            let path = if absolute {
+                name.clone()
             } else {
-                self.directory.join(name)
+                self.directory.join(&name)
             };
             // TeX writes `dir/./file`; collecting the components drops the dot.
             let path: PathBuf = path.components().collect();
+            // A relative `Input:` is resolved against the directory the
+            // scanner was opened with. When the sidecar sits in a build
+            // subdirectory (`-output-directory build`), the source lives one
+            // level up, so fall back to that spelling when the file is not
+            // where the scanner put it.
+            let path = if path.exists() || absolute {
+                path
+            } else {
+                self.directory
+                    .parent()
+                    .map(|parent| parent.join(&name))
+                    .map(|candidate| candidate.components().collect::<PathBuf>())
+                    .filter(|candidate| candidate.exists())
+                    .unwrap_or(path)
+            };
             Ok(Some(SyncSource {
                 path,
                 line: synctex_node_line(node).max(1) as u64,

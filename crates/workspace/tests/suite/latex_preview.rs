@@ -54,7 +54,9 @@ fn click(rt: &mut Runtime<Workspace>, key: &str) {
 #[test]
 fn the_built_pdf_opens_beside_the_source() {
     isolate_settings();
-    let directory = scratch();
+    // macOS's temporary directory is a symlink; the workspace stores the
+    // canonical spelling, so compare against that.
+    let directory = scratch().canonicalize().unwrap();
     let tex = directory.join("main.tex");
     let pdf = directory.join("main.pdf");
     std::fs::write(&tex, "\\documentclass{article}\n").unwrap();
@@ -378,6 +380,64 @@ fn the_preview_button_opens_the_existing_pdf_without_building() {
     assert!(
         rt.state.split_document.is_none(),
         "the X closes the preview pane"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_finished_build_reloads_the_open_pdf() {
+    isolate_settings();
+    let directory = scratch().canonicalize().unwrap();
+    let tex = directory.join("main.tex");
+    let pdf = directory.join("main.pdf");
+    let replacement = directory.join("replacement.pdf");
+    std::fs::write(&tex, "\\documentclass{article}\n").unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    std::fs::copy(fixtures.join("sample.pdf"), &pdf).unwrap();
+    // The build's output has two pages; the open preview starts with one.
+    std::fs::copy(fixtures.join("outline.pdf"), &replacement).unwrap();
+
+    let mut workspace = Workspace::new();
+    workspace.settings.split = false;
+    workspace.open_folder(&directory).expect("the folder opens");
+    workspace.open_path(&tex).expect("the source opens");
+    workspace.open_pdf_beside_source();
+    let index = workspace.split_document.expect("the preview is open");
+    let pages = match &workspace.documents[index] {
+        Document::Pdf(view) => view.page_count(),
+        _ => panic!("the preview is a PDF"),
+    };
+    assert_eq!(pages, 1, "the fixture preview has one page");
+
+    // A build that succeeds and replaces the PDF with the two-page fixture.
+    let options = lide_latex::BuildOptions {
+        program: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            format!("cp {} main.pdf", replacement.display()),
+            tex.display().to_string(),
+        ],
+        directory: directory.clone(),
+    };
+    workspace.build = Some(lide_latex::Build::start(options).expect("the fake build starts"));
+
+    for _ in 0..400 {
+        workspace.poll();
+        if workspace.build.as_ref().is_some_and(|build| build.finished) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    workspace.poll();
+
+    let pages = match &workspace.documents[index] {
+        Document::Pdf(view) => view.page_count(),
+        _ => panic!("the preview is still a PDF"),
+    };
+    assert_eq!(
+        pages, 2,
+        "the open preview shows the PDF the build wrote, not the one it opened"
     );
 
     let _ = std::fs::remove_dir_all(&directory);

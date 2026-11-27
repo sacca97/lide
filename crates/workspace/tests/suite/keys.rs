@@ -388,3 +388,35 @@ fn a_recent_project_opens_its_folder() {
 
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+#[test]
+fn cmd_s_on_macos_saves_a_dirty_tex_file_and_schedules_a_build() {
+    let mut rt = runtime();
+    let directory = std::env::temp_dir().join(format!("lide-cmd-s-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let tex = directory.join("main.tex");
+    std::fs::write(&tex, "\\documentclass{article}\n").unwrap();
+
+    rt.state.open_path(&tex).expect("the .tex file opens");
+    rt.state.active_editor_mut().unwrap().edit.insert("x");
+    rt.frame(0.0);
+
+    // macOS reports Cmd as `cmd` with the logo key, and no Control.
+    press(
+        &mut rt,
+        KeyEvent {
+            key: Key::Command('s'),
+            mods: Mods {
+                cmd: true,
+                logo: true,
+                ..Mods::default()
+            },
+        },
+    );
+
+    let text = std::fs::read_to_string(&tex).unwrap();
+    assert!(text.contains('x'), "the save wrote the edit: {text:?}");
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
