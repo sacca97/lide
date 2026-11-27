@@ -43,7 +43,7 @@ echo "rendering snapshots into ${OUT}"
 snap workspace .
 
 # A source file, with the cursor in it.
-snap editor crates/text/src/buffer.rs
+snap editor crates/workspace/src/editor/text/buffer.rs
 
 # A Markdown document: the source on the left, the preview on the right.
 snap markdown README.md

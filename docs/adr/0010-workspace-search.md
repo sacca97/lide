@@ -3,6 +3,10 @@
 - Status: accepted
 - Date: 2026-11-24
 
+> **Amended (2026-11-27).** The crate that held the search protocol was folded into
+> `lide-workspace`; see [0008](0008-crate-layout.md) for the current
+> layout. The decision itself stands.
+
 ## Context
 
 The editor needs to search a project: literal and regular-expression

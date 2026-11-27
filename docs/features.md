@@ -76,7 +76,7 @@ rename across files, and code actions.
 
 | Format | Extensions | How it opens | Capabilities |
 | --- | --- | --- | --- |
-| Markdown | `.md`, `.markdown`, `.mdown`, `.mkd` | source + outline + live preview | GFM tables, task lists, links, fenced code, math, Mermaid; synchronised scrolling; heading outline navigation; HTML export available in `lide-markdown` |
+| Markdown | `.md`, `.markdown`, `.mdown`, `.mkd` | source + outline + live preview | GFM tables, task lists, links, fenced code, math, Mermaid; synchronised scrolling; heading outline navigation; HTML export available in the workspace |
 | PDF | `.pdf` | rendered document | previous/next page controls, zoom buttons, `Ctrl+=` / `Ctrl+-` / `Ctrl+0`, pinch and Ctrl+wheel zoom, smooth wheel scrolling that turns the page at either end, text search with glyph highlights, pointer text selection, bookmark outline, on-demand rendering and caching |
 | Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`, `.ico`, `.avif`, `.tiff` | preview scaled to fit | pixel size in the status bar |
 | SVG | `.svg` | preview | **Toggle SVG source / preview**; saving the source redraws the preview |

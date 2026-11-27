@@ -2,6 +2,10 @@
 
 - Status: accepted
 - Date: 2026-11-24
+
+> **Amended (2026-11-27).** The crate that held the crates that do not draw anything was folded into
+> `lide-workspace`; see [0008](0008-crate-layout.md) for the current
+> layout. The decision itself stands.
 - Supersedes: the original plan's choice of GPUI
 
 ## Context

@@ -3,6 +3,10 @@
 - Status: superseded (2026-11-25)
 - Date: 2026-11-24
 
+> **Amended (2026-11-27).** The crate that held the text buffer was folded into
+> `lide-workspace`; see [0008](0008-crate-layout.md) for the current
+> layout. The decision itself stands.
+
 > **Superseded.** Rune's `TextEdit` owns editing, undo and selections in the
 > editor. The rope-backed buffer, `SelectionSet`, `History` and `Edit` were
 > never used outside their own tests and have been removed. `lide-text` now

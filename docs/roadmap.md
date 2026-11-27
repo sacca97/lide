@@ -116,7 +116,7 @@ conflict views.
 | Math and Mermaid | done, through `rune-kit` |
 | Heading outline and navigation | done: the outline is a pane beside the source, and clicking a heading puts the caret on its line |
 | Synchronised scrolling between source and preview | done: a wheel over either pane moves the other to the same fraction of its content |
-| Export to HTML | done (`lide-markdown`) |
+| Export to HTML | done |
 | PDF page navigation, zoom, fit | done |
 | PDF text search | done: a field in the header, every match on the page highlighted at its glyphs, next/previous |
 | PDF bookmark navigation | done: the document's own outline is a pane beside the page, clickable to the page each entry names, nested entries indented |

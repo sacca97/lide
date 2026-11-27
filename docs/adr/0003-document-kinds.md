@@ -3,6 +3,10 @@
 - Status: amended (2026-11-25)
 - Date: 2026-11-24
 
+> **Amended (2026-11-27).** The crate that held the document kinds was folded into
+> `lide-workspace`; see [0008](0008-crate-layout.md) for the current
+> layout. The decision itself stands.
+
 > **Amended.** Only `DocumentKind` remains. The workspace owns the document
 > lifecycle as an enum, and `Capabilities`, `Document`, `Provider` and the
 > registry were unused outside their tests and have been removed. The text

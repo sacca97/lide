@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Date: 2026-11-24
+- Amended: 2026-11-27 — the single-consumer crates were folded into the
+  workspace; the crate boundaries are now the shared contracts.
 
 ## Context
 
@@ -10,35 +12,38 @@ warns against a crate for every small helper.
 
 ## Decision
 
-Nine crates, split where the ownership, the dependencies or the testing
+Eight crates, split where the ownership, the dependencies or the testing
 boundary justify it.
 
 ```
 crates/
 ├── app/          # the binary: the command line, the window, the global keys
-├── workspace/    # the project, its files, the tabs, and the window's layout
-├── editor/       # the source editor: a document backed by a text field
-├── text/         # UTF-8 and line-ending helpers (no UI)
-├── documents/    # document kinds and the parsers behind the viewers
-├── markdown/     # the Markdown model, the outline and the HTML export
+├── workspace/    # everything the editor owns: the state, the documents, the views
 ├── pdf/          # PDF structure, rendering and text extraction
-└── platform/     # Linux specifics: XDG paths, the session, the tools
+├── latex/        # LaTeX builds and the SyncTeX map
+├── lsp/          # the language server client
+├── remote/       # the agent, its protocol and the client that talks to it
+├── resource/     # where a document lives: a local path or an SSH agent
+└── rpc/          # Content-Length framed JSON (the LSP client and the agent)
 ```
 
 ## The rules
 
+* **A crate is a boundary someone else needs.** A helper with one consumer
+  is a module, not a crate: it costs a manifest, a dependency edge and a
+  place to look, and buys nothing. The workspace holds the editor, the
+  document registry, the parsers behind the viewers, the Markdown model, the
+  search, the git reader, the terminal and the platform specifics.
 * **`app` composes; it does not implement.** It parses the command line, opens
-  the window and owns the global shortcuts. Everything else lives in a crate.
-* **`workspace` coordinates.** It knows which documents are open and which one
-  is active, and it draws the window. It depends on the document crates and
-  on nothing else.
-* **`ui` holds no domain logic.** If a component needs to know what a
-  document is, that knowledge belongs to the crate that owns the document.
-* **`text`, `documents`, `markdown` and `platform` have no UI dependency.**
-  They are unit tested without a display, and they would survive a change of
-  framework.
-* **`editor` depends on `text` and on the editing model**; it does not depend
-  on `workspace`.
+  the window and owns the global shortcuts.
+* **A crate that another crate depends on stays a crate.** `resource` is the
+  contract between the editor and the remote agent: both implement the same
+  `Store`, and the agent cannot depend on the workspace without a cycle.
+  `rpc` is the contract between the LSP client and the agent, which speak the
+  same framing.
+* **A crate with a binary or a native library stays a crate.** `remote` builds
+  the `lide-agent` that runs on the other machine; `pdf` loads PDFium at
+  runtime.
 * **The document crates never depend on each other.** `pdf` does not know
   about `markdown`.
 
@@ -47,21 +52,22 @@ crates/
 ```
         app
          │
-     workspace ── editor ── text
-         │          │
-         │          └──── documents
-         ├──────── markdown
-         ├──────── pdf
-         └──────── ui
+     workspace ── pdf
+         ├──────── latex ── lsp ── rpc
+         ├──────── lsp
+         └──────── remote ── resource
+                          └──── rpc
 ```
 
 There are no cycles, and nothing depends on `app`.
 
 ## Consequences
 
-* The crates that matter can be tested in isolation: `cargo test -p lide-text`
-  needs nothing but a terminal.
+* The workspace is one crate with many modules; `cargo test -p lide-workspace`
+  covers them together, and the parsers that had no UI still have none.
 * The crates that draw can be tested headlessly: `cargo test -p lide` renders
   the views to PNGs.
-* A framework change touches `ui`, `editor`, `workspace`, `pdf` and `app`. It
-  does not touch `text`, `documents`, `markdown` or `platform`.
+* A framework change touches `workspace`, `pdf` and `app`. The parsers and
+  the models sit beside them, but they do not import the framework.
+* Moving a helper between crates is a `git mv` and an import change, not a
+  new package to publish.

@@ -203,7 +203,7 @@ the views can be checked without a display server:
 ./scripts/snapshots.sh
 
 # Render one view.
-cargo run -p lide -- --snap /tmp/editor.png crates/text/src/buffer.rs
+cargo run -p lide -- --snap /tmp/editor.png crates/workspace/src/editor/text/buffer.rs
 
 # Dump the element tree.
 cargo run -p lide -- --tree /tmp/tree.json .
