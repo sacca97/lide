@@ -7,7 +7,8 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use crate::view::terminal::terminal_view;
 use crate::view::{empty_note, icon_button};
-use crate::{clamp_split_ratio, line_starts, offset_at_line, Document, Workspace};
+use crate::text_edits::{line_starts, offset_at_line};
+use crate::{clamp_split_ratio, Document, Workspace};
 use crate::editor::Editor;
 use lide_pdf::view::PdfView;
 

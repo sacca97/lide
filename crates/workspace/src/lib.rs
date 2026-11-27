@@ -14,6 +14,8 @@ pub mod editor;
 pub mod git;
 pub mod csv_view;
 pub mod diff;
+pub mod document;
+pub use document::Document;
 pub mod find;
 pub mod icons;
 pub mod images;
@@ -28,6 +30,7 @@ pub mod servers;
 pub mod settings;
 pub mod tasks;
 pub mod terminal;
+pub mod text_edits;
 pub mod theme;
 pub mod tree;
 pub mod watch;
@@ -55,6 +58,7 @@ const COMPLETION_DEBOUNCE: f64 = 0.15;
 const GIT_REFRESH_INTERVAL: f64 = 2.0;
 use crate::watch::Watch;
 use crate::search::{Query, Search};
+use crate::text_edits::{apply_text_edits, replace_range, word_at};
 
 /// The rail down the left edge and the gap around the rounded cards.
 const SIDEBAR_RAIL_WIDTH: f32 = 42.0;
@@ -367,143 +371,7 @@ impl Default for Workspace {
     }
 }
 
-/// A document that is open in the workspace.
-///
-/// The variants are boxed where they are large: a terminal carries a PTY and
-/// a grid, and letting that size leak into every `Document` would make every
-/// tab pay for it.
-pub enum Document {
-    /// A text or source file.
-    Text(Editor),
-    /// A Markdown file: the source and its preview.
-    Markdown {
-        /// The source text.
-        editor: Editor,
-        /// The headings of the document, for the outline.
-        outline: Vec<crate::markdown::OutlineEntry>,
-    },
-    /// A PDF file.
-    Pdf(Box<PdfView>),
-    /// A terminal.
-    Terminal(Box<crate::terminal::TerminalView>),
-    /// An image.
-    Image(Box<images::ImageView>),
-    /// A file's diff.
-    Diff(Box<diff::DiffView>),
-    /// A comma- or tab-separated table.
-    Csv(Box<csv_view::CsvView>),
-    /// A Jupyter notebook.
-    Notebook(Box<notebook_view::NotebookView>),
-}
 
-impl Document {
-    /// The kind of the document.
-    pub fn kind(&self) -> DocumentKind {
-        match self {
-            Document::Text(_) => DocumentKind::Text,
-            Document::Markdown { .. } => DocumentKind::Markdown,
-            Document::Pdf(_) => DocumentKind::Pdf,
-            Document::Terminal(_) => DocumentKind::Text,
-            Document::Image(_) => DocumentKind::Image,
-            Document::Diff(_) => DocumentKind::Text,
-            Document::Csv(_) => DocumentKind::Csv,
-            Document::Notebook(_) => DocumentKind::Notebook,
-        }
-    }
-
-    /// The title shown on the tab.
-    pub fn title(&self) -> String {
-        match self {
-            Document::Text(editor) => editor.title(),
-            Document::Markdown { editor, .. } => editor.title(),
-            Document::Pdf(pdf) => pdf.title(),
-            Document::Terminal(terminal) => terminal.title(),
-            Document::Image(image) => image.title(),
-            Document::Diff(diff) => diff.title(),
-            Document::Csv(csv) => csv.title(),
-            Document::Notebook(notebook) => notebook.title(),
-        }
-    }
-
-    /// Whether the document has unsaved changes.
-    pub fn is_dirty(&self) -> bool {
-        match self {
-            Document::Text(editor) => editor.dirty(),
-            Document::Markdown { editor, .. } => editor.dirty(),
-            Document::Pdf(_) => false,
-            Document::Terminal(_) => false,
-            Document::Image(_) => false,
-            Document::Diff(_) => false,
-            Document::Csv(_) => false,
-            Document::Notebook(_) => false,
-        }
-    }
-
-    /// Where the document lives, for local and remote text documents.
-    pub fn location(&self) -> Option<&lide_resource::Location> {
-        match self {
-            Document::Text(editor) => editor.location.as_ref(),
-            Document::Markdown { editor, .. } => editor.location.as_ref(),
-            _ => None,
-        }
-    }
-
-    /// The path the document was opened from.
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            Document::Text(editor) => editor.local_path(),
-            Document::Markdown { editor, .. } => editor.local_path(),
-            Document::Pdf(pdf) => Some(pdf.path()),
-            Document::Terminal(_) => None,
-            Document::Image(image) => Some(image.path()),
-            Document::Diff(_) => None,
-            Document::Csv(csv) => Some(csv.path()),
-            Document::Notebook(notebook) => Some(notebook.path()),
-        }
-    }
-
-    /// The text of the document, if it has any.
-    pub fn text(&self) -> Option<&str> {
-        match self {
-            Document::Text(editor) => Some(editor.text()),
-            Document::Markdown { editor, .. } => Some(editor.text()),
-            Document::Pdf(_) => None,
-            Document::Terminal(_) => None,
-            Document::Image(_) => None,
-            Document::Diff(_) => None,
-            Document::Csv(_) => None,
-            Document::Notebook(_) => None,
-        }
-    }
-
-    /// The editor of the document, if it is editable.
-    pub fn editor(&self) -> Option<&Editor> {
-        match self {
-            Document::Text(editor) => Some(editor),
-            Document::Markdown { editor, .. } => Some(editor),
-            Document::Pdf(_) => None,
-            Document::Terminal(_) => None,
-            Document::Image(_) => None,
-            Document::Diff(_) => None,
-            Document::Csv(_) => None,
-            Document::Notebook(_) => None,
-        }
-    }
-
-    /// The editor of the document, mutably.
-    pub fn editor_mut(&mut self) -> Option<&mut Editor> {
-        match self {
-            Document::Text(editor) => Some(editor),
-            Document::Markdown { editor, .. } => Some(editor),
-            Document::Pdf(_) => None,
-            Document::Terminal(_) => None,
-            Document::Image(_) => None,
-            Document::Diff(_) => None,
-            Document::Csv(_) => None,
-            Document::Notebook(_) => None,
-        }
-    }
-}
 
 /// Pick the source line a clicked word is on, among those near the line SyncTeX
 /// named, and the column of the word in it.
@@ -2846,116 +2714,10 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-/// Apply a server's edits to `text`.
-///
-/// The edits arrive in document order; they are applied from the end so that
-/// earlier offsets stay valid. An edit that overlaps one already applied, or
-/// that points outside the text, is dropped rather than corrupting the file.
-fn apply_text_edits(text: &str, edits: &[lide_lsp::client::ServerTextEdit]) -> String {
-    let lines = text.lines().count().max(1) as u64;
-    let mut offsets: Vec<(usize, usize, &str)> = Vec::with_capacity(edits.len());
-    for edit in edits {
-        // A position past the last line is a server bug; clamping it into an
-        // append would quietly move text, so the edit is dropped.
-        if edit.start.line >= lines || edit.end.line >= lines {
-            continue;
-        }
-        let start = offset_of(text, edit.start.line, edit.start.character);
-        let end = offset_of(text, edit.end.line, edit.end.character);
-        offsets.push((start, end, edit.new_text.as_str()));
-    }
-    offsets.sort_by_key(|(start, _, _)| *start);
 
-    let mut out = String::with_capacity(text.len() + 64);
-    let mut last = 0usize;
-    for (start, end, new_text) in offsets {
-        if start < last || end < start || end > text.len() || !text.is_char_boundary(start) {
-            continue;
-        }
-        out.push_str(&text[last..start]);
-        out.push_str(new_text);
-        last = end;
-    }
-    out.push_str(&text[last..]);
-    out
-}
 
-/// The identifier around `caret`, for prefilling a rename.
-fn word_at(text: &str, caret: usize) -> String {
-    let caret = caret.min(text.len());
-    let mut start = caret;
-    for (index, ch) in text[..caret].char_indices().rev() {
-        if ch.is_alphanumeric() || ch == '_' {
-            start = index;
-        } else {
-            break;
-        }
-    }
-    let mut end = caret;
-    for (index, ch) in text[caret..].char_indices() {
-        if ch.is_alphanumeric() || ch == '_' {
-            end = caret + index + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    text[start..end].to_string()
-}
 
-/// The byte offset of an LSP position in `text`.
-///
-/// LSP counts lines from zero and characters in UTF-16 code units, which is
-/// not the same as bytes whenever the text is not plain ASCII.
-fn line_starts(text: &str) -> Vec<usize> {
-    let mut starts = Vec::with_capacity(text.lines().count() + 1);
-    starts.push(0);
-    for (index, byte) in text.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push(index + 1);
-        }
-    }
-    starts
-}
 
-/// The byte offset of a UTF-16 `(line, character)` position, with line starts
-/// already computed.
-fn offset_at_line(text: &str, starts: &[usize], line: u64, character: u64) -> usize {
-    let start = starts
-        .get(line as usize)
-        .copied()
-        .unwrap_or(text.len());
-    let end = text[start..]
-        .find('\n')
-        .map(|index| start + index)
-        .unwrap_or(text.len());
-    let mut units = 0u64;
-    for (index, ch) in text[start..end].char_indices() {
-        if units >= character {
-            return start + index;
-        }
-        units += ch.len_utf16() as u64;
-    }
-    end
-}
-
-fn offset_of(text: &str, line: u64, character: u64) -> usize {
-    let mut offset = 0usize;
-    for (current_line, current) in text.split_inclusive('\n').enumerate() {
-        let current_line = current_line as u64;
-        if current_line == line {
-            let mut units = 0u64;
-            for (index, ch) in current.char_indices() {
-                if units >= character {
-                    return offset + index;
-                }
-                units += ch.len_utf16() as u64;
-            }
-            return offset + current.trim_end_matches('\n').len();
-        }
-        offset += current.len();
-    }
-    offset.min(text.len())
-}
 
 /// The files a set of matches touched, once each, in the order first seen.
 fn unique_paths(matches: &[crate::search::Match]) -> Vec<&Path> {
@@ -2969,18 +2731,11 @@ fn unique_paths(matches: &[crate::search::Match]) -> Vec<&Path> {
     paths
 }
 
-/// Replace `range` in `text`, returning the new string.
-fn replace_range(text: &str, range: std::ops::Range<usize>, replacement: &str) -> String {
-    let mut out = String::with_capacity(text.len() + replacement.len());
-    out.push_str(&text[..range.start]);
-    out.push_str(replacement);
-    out.push_str(&text[range.end.min(text.len())..]);
-    out
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_edits::offset_of;
     use crate::view::editor::diagnostic_spans;
 
     fn edit(start: (u64, u64), end: (u64, u64), text: &str) -> lide_lsp::client::ServerTextEdit {
