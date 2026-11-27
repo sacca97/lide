@@ -399,8 +399,8 @@ impl Document {
             Document::Terminal(_) => DocumentKind::Text,
             Document::Image(_) => DocumentKind::Image,
             Document::Diff(_) => DocumentKind::Text,
-            Document::Csv(_) => DocumentKind::Text,
-            Document::Notebook(_) => DocumentKind::Text,
+            Document::Csv(_) => DocumentKind::Csv,
+            Document::Notebook(_) => DocumentKind::Notebook,
         }
     }
 
@@ -1143,13 +1143,13 @@ impl Workspace {
                 Document::Markdown { editor, outline }
             }
             DocumentKind::Image => Document::Image(Box::new(images::ImageView::open(&path))),
-            DocumentKind::Text if is_table(&path) => {
-                Document::Csv(Box::new(csv_view::CsvView::open(&path)))
-            }
-            DocumentKind::Text if is_notebook(&path) => {
+            DocumentKind::Csv => Document::Csv(Box::new(csv_view::CsvView::open(&path))),
+            DocumentKind::Notebook => {
                 Document::Notebook(Box::new(notebook_view::NotebookView::open(&path)))
             }
-            _ => Document::Text(Editor::open(&path).map_err(|error| error.to_string())?),
+            DocumentKind::Text | DocumentKind::Binary => {
+                Document::Text(Editor::open(&path).map_err(|error| error.to_string())?)
+            }
         };
 
         self.documents.push(document);
@@ -2765,27 +2765,12 @@ pub fn kit(dark: bool) -> &'static Kit {
 
 
 
-fn is_table(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("csv") | Some("tsv")
-    )
-}
-
 /// Whether a file has an SVG source.
 fn is_svg(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .map(|extension| extension.eq_ignore_ascii_case("svg"))
         .unwrap_or(false)
-}
-
-/// Whether a file is a Jupyter notebook.
-fn is_notebook(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("ipynb")
-    )
 }
 
 
