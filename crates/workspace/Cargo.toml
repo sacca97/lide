@@ -14,19 +14,25 @@ rune-edit.workspace = true
 rune-image.workspace = true
 log.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
 notify = "9"
-lide-text = { path = "../text" }
-lide-editor = { path = "../editor" }
-lide-markdown = { path = "../markdown" }
+# The parsers behind the viewers: tables, notebooks, structured data.
+toml = "0.8"
+yaml-rust2 = "0.10"
+quick-xml = "0.41"
+regex = "1"
+# The terminal: a PTY and a VT emulator.
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+# The Markdown model.
+pulldown-cmark.workspace = true
+# Platform specifics: XDG paths, the session, the external tools.
+libc.workspace = true
+dirs.workspace = true
 lide-pdf = { path = "../pdf" }
-lide-documents = { path = "../documents" }
-lide-search = { path = "../search" }
 lide-resource = { path = "../resource" }
 lide-remote = { path = "../remote" }
 lide-lsp = { path = "../lsp" }
-lide-git = { path = "../git" }
 lide-latex = { path = "../latex" }
-lide-terminal = { path = "../terminal" }
-lide-platform = { path = "../platform" }
 

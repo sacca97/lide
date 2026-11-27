@@ -6,7 +6,7 @@
 //! byte order mark), remembering the line ending it used, and writing it back
 //! the same way.
 //!
-//! Offsets exposed by this crate are byte offsets into the UTF-8 text.
+//! Offsets exposed by this module are byte offsets into the UTF-8 text.
 
 pub mod buffer;
 

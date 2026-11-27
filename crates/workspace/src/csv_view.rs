@@ -7,12 +7,12 @@
 //! Clicking a header sorts by that column; typing in the header filters the
 //! body. Both are view state: the file is not rewritten.
 //!
-//! The parse is [`lide_documents::csv`]'s, so it can be tested without a
+//! The parse is [`crate::documents::csv`]'s, so it can be tested without a
 //! window.
 
 use std::path::{Path, PathBuf};
 
-use lide_documents::csv::{Delimiter, Table};
+use crate::documents::csv::{Delimiter, Table};
 use rune::{col, el, row, text, text_input, El, ScrollSpec};
 use rune_edit::TextEdit;
 use rune_kit::Kit;

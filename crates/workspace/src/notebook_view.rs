@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lide_documents::notebook::{CellKind, Notebook};
+use crate::documents::notebook::{CellKind, Notebook};
 use rune::{col, row, text, El, ScrollSpec};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 use rune_kit::Kit;

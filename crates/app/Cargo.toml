@@ -20,5 +20,4 @@ log.workspace = true
 anyhow.workspace = true
 lide-lsp = { path = "../lsp" }
 lide-latex = { path = "../latex" }
-lide-platform = { path = "../platform" }
 lide-workspace = { path = "../workspace" }

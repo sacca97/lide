@@ -11,9 +11,6 @@ description = "The lide agent and client: files over a framed JSON protocol."
 name = "lide-agent"
 path = "src/bin/lide-agent.rs"
 
-[dev-dependencies]
-lide-editor = { path = "../editor" }
-
 [dependencies]
 lide-rpc = { path = "../rpc" }
 lide-resource = { path = "../resource" }

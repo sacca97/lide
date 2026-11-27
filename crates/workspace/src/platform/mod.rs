@@ -1,9 +1,9 @@
-//! Linux-specific integrations.
+//! Platform-specific integrations.
 //!
-//! Everything in this crate is a thin wrapper over a platform facility that
-//! the rest of the editor should not have to know about: XDG directories, the
-//! desktop session type, terminal detection and the presence of the external
-//! tools the editor can drive.
+//! Everything here is a thin wrapper over a platform facility that the rest
+//! of the editor should not have to know about: XDG directories, the desktop
+//! session type, terminal detection and the presence of the external tools
+//! the editor can drive.
 //!
 //! Keeping these behind a narrow interface is what makes it possible to add
 //! macOS and Windows later without touching the subsystems above.

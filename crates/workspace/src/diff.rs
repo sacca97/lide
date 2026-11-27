@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lide_git::{DiffKind, DiffLine};
+use crate::git::{DiffKind, DiffLine};
 use rune::{col, el, row, text, El, ScrollSpec};
 use rune_kit::Kit;
 
@@ -40,7 +40,7 @@ impl DiffView {
     /// Open the diff of `path`.
     pub fn open(root: &Path, path: impl AsRef<Path>, staged: bool) -> Self {
         let path = path.as_ref().to_path_buf();
-        let repo = lide_git::Repo {
+        let repo = crate::git::Repo {
             root: root.to_path_buf(),
         };
         let text = repo.diff_file(&path, staged).unwrap_or_default();
@@ -49,7 +49,7 @@ impl DiffView {
             path,
             staged,
             conflict: false,
-            lines: lide_git::parse_diff(&text),
+            lines: crate::git::parse_diff(&text),
         }
     }
 

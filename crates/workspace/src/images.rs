@@ -2,7 +2,7 @@
 //!
 //! An image opens as its own document and is drawn at its own size, scaled
 //! down to fit the window. It cannot be edited, searched or saved — which is
-//! what [`lide_documents::Capabilities`] says about it.
+//! what [`crate::documents::Capabilities`] says about it.
 
 use std::path::{Path, PathBuf};
 

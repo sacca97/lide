@@ -4,7 +4,7 @@
 //! [`rune_edit::TextEdit`], which brings byte-accurate selections, an undo
 //! history, IME composition and the usual key handling with it.
 //!
-//! What this crate adds is the *document* around the text: where it came
+//! What this module adds is the *document* around the text: where it came
 //! from, whether it has unsaved changes, and how to read and write it back.
 
 use std::path::Path;
@@ -12,6 +12,10 @@ use std::sync::Arc;
 
 use lide_resource::{LocalStore, Location, Store};
 use rune_edit::TextEdit;
+
+pub mod text;
+
+pub use text::{Encoding, LineEnding, TextBuffer};
 
 /// Errors raised while reading or writing a document.
 #[derive(Debug, thiserror::Error)]
@@ -50,9 +54,9 @@ pub struct Editor {
     /// The text as it was last written to disk or read from it.
     saved_text: String,
     /// The line ending the file was read with.
-    line_ending: lide_text::LineEnding,
+    line_ending: text::LineEnding,
     /// The encoding the file was read with.
-    encoding: lide_text::Encoding,
+    encoding: text::Encoding,
     /// The store that reads and writes the location.
     store: Arc<dyn Store>,
 }
@@ -63,8 +67,8 @@ impl Default for Editor {
             edit: TextEdit::new(""),
             location: None,
             saved_text: String::new(),
-            line_ending: lide_text::LineEnding::Lf,
-            encoding: lide_text::Encoding::Utf8,
+            line_ending: text::LineEnding::Lf,
+            encoding: text::Encoding::Utf8,
             store: Arc::new(LocalStore),
         }
     }
@@ -93,7 +97,7 @@ impl Editor {
             path: location.to_string(),
             message: error.to_string(),
         })?;
-        let buffer = lide_text::TextBuffer::from_bytes(&bytes).ok_or_else(|| {
+        let buffer = text::TextBuffer::from_bytes(&bytes).ok_or_else(|| {
             EditorError::NotUtf8 {
                 path: location.to_string(),
             }

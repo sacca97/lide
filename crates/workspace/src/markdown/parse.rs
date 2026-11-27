@@ -8,7 +8,7 @@ use pulldown_cmark::{
     Tag, TagEnd,
 };
 
-use crate::ast::{Alignment, Block, Inline, ListItem};
+use crate::markdown::ast::{Alignment, Block, Inline, ListItem};
 
 /// The extensions the editor enables.
 ///
@@ -466,8 +466,8 @@ fn non_empty(value: pulldown_cmark::CowStr<'_>) -> Option<String> {
 /// The tree in [`parse`] does not carry positions, so the event stream is
 /// walked again with its byte ranges: a heading's range starts at the `#`, and
 /// the line is however many newlines came before it.
-pub fn outline(source: &str) -> Vec<crate::ast::OutlineEntry> {
-    use crate::ast::{slugify, OutlineEntry};
+pub fn outline(source: &str) -> Vec<crate::markdown::ast::OutlineEntry> {
+    use crate::markdown::ast::{slugify, OutlineEntry};
 
     let parser = Parser::new_ext(source, default_options()).into_offset_iter();
     let mut entries = Vec::new();
@@ -489,7 +489,7 @@ pub fn outline(source: &str) -> Vec<crate::ast::OutlineEntry> {
                     line += source[last_offset..offset].matches('\n').count() as u64;
                     last_offset = offset;
                     let anchor =
-                        crate::ast::unique_anchor(&slugify(&text), &mut used);
+                        crate::markdown::ast::unique_anchor(&slugify(&text), &mut used);
                     entries.push(OutlineEntry {
                         level,
                         title: text.clone(),
@@ -520,7 +520,7 @@ pub fn is_external_link(link_type: LinkType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::inline_text;
+    use crate::markdown::ast::inline_text;
 
     #[test]
     fn the_outline_gives_each_heading_its_line() {

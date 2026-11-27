@@ -6,7 +6,7 @@
 
 use pulldown_cmark::{html, Options, Parser};
 
-use crate::parse::default_options;
+use crate::markdown::parse::default_options;
 
 /// Render Markdown source to an HTML fragment.
 pub fn to_html_fragment(source: &str) -> String {

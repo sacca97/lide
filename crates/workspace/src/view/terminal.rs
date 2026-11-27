@@ -4,7 +4,7 @@ use rune_kit::{Button, Kit};
 use crate::{Document, Workspace, CARD_GAP};
 
 pub(crate) fn terminal_view(
-    terminal: &lide_terminal::TerminalView,
+    terminal: &crate::terminal::TerminalView,
     s: &Workspace,
     k: &Kit,
     pane: usize,

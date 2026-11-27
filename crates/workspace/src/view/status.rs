@@ -4,7 +4,7 @@ use rune_kit::Kit;
 
 use crate::view::icon_button;
 use crate::{Document, Workspace};
-use lide_editor::Editor;
+use crate::editor::Editor;
 
 pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
     let mut left: Vec<(String, bool)> = Vec::new();

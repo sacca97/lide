@@ -66,7 +66,7 @@ impl Workspace {
                     .and_then(lide_resource::Location::extension)
                 {
                     Some(extension) if extension.eq_ignore_ascii_case("md") => {
-                        let outline = lide_markdown::outline(editor.text());
+                        let outline = crate::markdown::outline(editor.text());
                         self.documents.push(Document::Markdown { editor, outline });
                     }
                     _ => self.documents.push(Document::Text(editor)),
@@ -469,7 +469,7 @@ impl Workspace {
 
             let Some(on_disk) = std::fs::read(&change.path)
                 .ok()
-                .and_then(|bytes| lide_text::TextBuffer::from_bytes(&bytes))
+                .and_then(|bytes| crate::editor::text::TextBuffer::from_bytes(&bytes))
                 .map(|buffer| buffer.to_text())
             else {
                 // The file is gone.

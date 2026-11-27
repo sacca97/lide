@@ -89,13 +89,13 @@ fn main() -> anyhow::Result<()> {
     // The editor's own directories follow the XDG base directory
     // specification; they are created up front so that a later write cannot
     // fail for want of a directory.
-    let paths = lide_platform::AppPaths::resolve();
+    let paths = lide_workspace::platform::AppPaths::resolve();
     if let Err(error) = paths.ensure() {
         log::warn!("could not create the editor's directories: {error}");
     }
     log::info!(
         "lide starting on {} (config in {})",
-        lide_platform::SessionType::detect().label(),
+        lide_workspace::platform::SessionType::detect().label(),
         paths.config.display()
     );
 

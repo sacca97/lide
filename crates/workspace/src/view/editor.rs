@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 use crate::view::terminal::terminal_view;
 use crate::view::{empty_note, icon_button};
 use crate::{clamp_split_ratio, line_starts, offset_at_line, Document, Workspace};
-use lide_editor::Editor;
+use crate::editor::Editor;
 use lide_pdf::view::PdfView;
 
 pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {

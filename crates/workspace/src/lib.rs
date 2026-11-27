@@ -9,6 +9,9 @@ pub mod command;
 mod view;
 pub use view::view;
 pub mod dialog;
+pub mod documents;
+pub mod editor;
+pub mod git;
 pub mod csv_view;
 pub mod diff;
 pub mod find;
@@ -16,19 +19,23 @@ pub mod icons;
 pub mod images;
 pub mod keys;
 pub mod latex_discovery;
+pub mod markdown;
 pub mod notebook_view;
+pub mod platform;
 pub mod poll;
+pub mod search;
 pub mod servers;
 pub mod settings;
 pub mod tasks;
+pub mod terminal;
 pub mod theme;
 pub mod tree;
 pub mod watch;
 
 use std::path::{Path, PathBuf};
 
-use lide_documents::{detect_kind, DocumentKind};
-use lide_editor::Editor;
+use crate::documents::{detect_kind, DocumentKind};
+use crate::editor::Editor;
 use lide_pdf::view::PdfView;
 use rune_edit::TextEdit;
 use rune::Live;
@@ -47,7 +54,7 @@ const COMPLETION_DEBOUNCE: f64 = 0.15;
 /// How often the repository status is refreshed, in seconds.
 const GIT_REFRESH_INTERVAL: f64 = 2.0;
 use crate::watch::Watch;
-use lide_search::{Query, Search};
+use crate::search::{Query, Search};
 
 /// The rail down the left edge and the gap around the rounded cards.
 const SIDEBAR_RAIL_WIDTH: f32 = 42.0;
@@ -174,9 +181,9 @@ pub struct Workspace {
     /// The app's clock, in seconds, updated every frame.
     now: f64,
     /// The repository the project is in, when it is in one.
-    pub repo: Option<lide_git::Repo>,
+    pub repo: Option<crate::git::Repo>,
     /// The repository's status, refreshed periodically.
-    pub git: Option<lide_git::Status>,
+    pub git: Option<crate::git::Status>,
     /// When the status was last refreshed, on the app's clock.
     last_git_refresh: f64,
     /// The terminal area's rect from the previous layout, so that the PTY can
@@ -244,7 +251,7 @@ pub struct Workspace {
     /// What workspace search replaces matches with.
     pub search_replacement: TextEdit,
     /// A workspace replace running on a background thread.
-    pub replace: Option<lide_search::Replace>,
+    pub replace: Option<crate::search::Replace>,
     /// A `.tex` file was saved, so the next frame builds it.
     latex_build_after_save: bool,
     /// A remote document being opened off the UI thread.
@@ -373,12 +380,12 @@ pub enum Document {
         /// The source text.
         editor: Editor,
         /// The headings of the document, for the outline.
-        outline: Vec<lide_markdown::OutlineEntry>,
+        outline: Vec<crate::markdown::OutlineEntry>,
     },
     /// A PDF file.
     Pdf(Box<PdfView>),
     /// A terminal.
-    Terminal(Box<lide_terminal::TerminalView>),
+    Terminal(Box<crate::terminal::TerminalView>),
     /// An image.
     Image(Box<images::ImageView>),
     /// A file's diff.
@@ -668,7 +675,7 @@ impl Workspace {
             None => self.tree.directory_paths().into_iter().collect(),
         };
         self.watch = Watch::new(&path);
-        self.repo = lide_git::Repo::discover(&path).ok();
+        self.repo = crate::git::Repo::discover(&path).ok();
         self.refresh_tasks();
         self.refresh_git(true);
         self.settings.remember_project(&path);
@@ -712,7 +719,7 @@ impl Workspace {
         }
     }
 
-    pub fn active_terminal_mut(&mut self) -> Option<&mut lide_terminal::TerminalView> {
+    pub fn active_terminal_mut(&mut self) -> Option<&mut crate::terminal::TerminalView> {
         match self.active_document_mut()? {
             Document::Terminal(terminal) => Some(terminal),
             _ => None,
@@ -722,7 +729,7 @@ impl Workspace {
     /// Open a terminal in the workspace root, or wherever the editor started.
     /// Ask which SSH host to open a terminal to.
     pub fn begin_ssh_connect(&mut self) {
-        let hosts = lide_platform::ssh::hosts();
+        let hosts = crate::platform::ssh::hosts();
         let first = hosts.first().cloned().unwrap_or_default();
         self.dialog = Some(DialogState::SshHosts {
             hosts,
@@ -749,7 +756,7 @@ impl Workspace {
     pub fn open_ssh_terminal(&mut self, host: &str) {
         let directory = self.terminal_start_directory();
         let size = self.terminal_size();
-        match lide_terminal::TerminalView::open_ssh(host, &directory.to_string_lossy(), size) {
+        match crate::terminal::TerminalView::open_ssh(host, &directory.to_string_lossy(), size) {
             Ok(terminal) => {
                 self.documents.push(Document::Terminal(Box::new(terminal)));
                 self.active = self.documents.len() - 1;
@@ -760,7 +767,7 @@ impl Workspace {
 
     /// Ask for a host and a remote file to open.
     pub fn begin_remote_file(&mut self) {
-        let hosts = lide_platform::ssh::hosts();
+        let hosts = crate::platform::ssh::hosts();
         let first = hosts.first().cloned().unwrap_or_default();
         self.dialog = Some(DialogState::RemoteFile {
             hosts,
@@ -842,13 +849,13 @@ impl Workspace {
     pub fn open_terminal(&mut self) -> Result<(), String> {
         let directory = self.terminal_start_directory();
         let shell = if self.settings.terminal_shell.trim().is_empty() {
-            lide_terminal::default_shell()
+            crate::terminal::default_shell()
         } else {
             self.settings.terminal_shell.trim().to_string()
         };
         let size = self.terminal_size();
         let terminal =
-            lide_terminal::TerminalView::open(&shell, &directory.to_string_lossy(), size)
+            crate::terminal::TerminalView::open(&shell, &directory.to_string_lossy(), size)
                 .map_err(|error| error.to_string())?;
         self.documents.push(Document::Terminal(Box::new(terminal)));
         self.active = self.documents.len() - 1;
@@ -980,21 +987,21 @@ impl Workspace {
     }
 
     /// Send a key to the active terminal.
-    pub fn write_terminal_key(&mut self, key: &lide_terminal::Key) {
+    pub fn write_terminal_key(&mut self, key: &crate::terminal::Key) {
         if let Some(terminal) = self.active_terminal_mut() {
             terminal.write_key(key);
         }
     }
 
     /// The terminal's size in cells, from the area it was last drawn in.
-    fn terminal_size(&self) -> lide_terminal::Size {
+    fn terminal_size(&self) -> crate::terminal::Size {
         let advance = self.settings.font_size * 0.62;
         let line_height = self.settings.line_height();
         let rect = self.terminal_rect.get();
         let (width, height) = rect
             .map(|rect| (rect[2], rect[3]))
             .unwrap_or((900.0, 500.0));
-        lide_terminal::Size {
+        crate::terminal::Size {
             cols: ((width - 12.0) / advance).max(20.0) as usize,
             rows: ((height - 12.0) / line_height).max(5.0) as usize,
         }
@@ -1139,7 +1146,7 @@ impl Workspace {
             }
             DocumentKind::Markdown => {
                 let editor = Editor::open(&path).map_err(|error| error.to_string())?;
-                let outline = lide_markdown::outline(editor.text());
+                let outline = crate::markdown::outline(editor.text());
                 Document::Markdown { editor, outline }
             }
             DocumentKind::Image => Document::Image(Box::new(images::ImageView::open(&path))),
@@ -2082,7 +2089,7 @@ impl Workspace {
             return;
         };
         // `xdg-open` on Linux, `open` on macOS; lide-platform picks one.
-        if let Err(error) = lide_platform::reveal(directory) {
+        if let Err(error) = crate::platform::reveal(directory) {
             self.notice = Some(format!("could not reveal the file: {error}"));
         }
     }
@@ -2288,7 +2295,7 @@ impl Workspace {
             self.notice = Some("the active document has no file".to_string());
             return;
         };
-        let Some(kind) = lide_documents::structured::Kind::for_path(path) else {
+        let Some(kind) = crate::documents::structured::Kind::for_path(path) else {
             self.notice = Some("no JSON, TOML, YAML or XML checker for this file".to_string());
             return;
         };
@@ -2301,7 +2308,7 @@ impl Workspace {
             return;
         };
 
-        match lide_documents::structured::validate(text, kind) {
+        match crate::documents::structured::validate(text, kind) {
             Ok(()) => self.notice = Some(format!("{name}: valid {}", kind.name())),
             Err(problem) => self.notice = Some(format!("{name}: {problem}")),
         }
@@ -2317,7 +2324,7 @@ impl Workspace {
             self.notice = Some("the active document has no file".to_string());
             return;
         };
-        let Some(kind) = lide_documents::structured::Kind::for_path(path) else {
+        let Some(kind) = crate::documents::structured::Kind::for_path(path) else {
             self.notice = Some("no JSON or XML formatter for this file".to_string());
             return;
         };
@@ -2326,7 +2333,7 @@ impl Workspace {
             return;
         };
 
-        match lide_documents::structured::format(&text, kind) {
+        match crate::documents::structured::format(&text, kind) {
             Ok(formatted) if formatted == text => {
                 self.notice = Some(format!("{} is already formatted", kind.name()));
             }
@@ -2452,7 +2459,7 @@ impl Workspace {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
             };
-            let Some(buffer) = lide_text::TextBuffer::from_bytes(&bytes) else {
+            let Some(buffer) = crate::editor::text::TextBuffer::from_bytes(&bytes) else {
                 continue;
             };
             let text = buffer.to_text();
@@ -2615,7 +2622,7 @@ impl Workspace {
             .collect();
         let query = search.query.clone();
         let replacement = self.search_replacement.text.clone();
-        self.replace = Some(lide_search::Replace::start(paths, query, replacement));
+        self.replace = Some(crate::search::Replace::start(paths, query, replacement));
         self.notice = Some("replacing…".to_string());
     }
 
@@ -2951,7 +2958,7 @@ fn offset_of(text: &str, line: u64, character: u64) -> usize {
 }
 
 /// The files a set of matches touched, once each, in the order first seen.
-fn unique_paths(matches: &[lide_search::Match]) -> Vec<&Path> {
+fn unique_paths(matches: &[crate::search::Match]) -> Vec<&Path> {
     let mut paths: Vec<&Path> = Vec::new();
     for found in matches {
         let path = found.path.as_path();
@@ -3200,7 +3207,7 @@ mod tests {
 
     fn workspace_with_text(text: &str) -> Workspace {
         let mut workspace = Workspace::new();
-        let mut editor = lide_editor::Editor::empty();
+        let mut editor = crate::editor::Editor::empty();
         editor.edit.replace_text(text);
         editor.edit.set_caret(text.len());
         workspace.documents.push(Document::Text(editor));
@@ -3555,7 +3562,7 @@ mod tests {
     }
 
     fn push_text(workspace: &mut Workspace, text: &str) {
-        let mut editor = lide_editor::Editor::empty();
+        let mut editor = crate::editor::Editor::empty();
         editor.edit.replace_text(text);
         workspace.documents.push(Document::Text(editor));
     }

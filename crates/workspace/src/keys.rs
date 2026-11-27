@@ -283,8 +283,8 @@ fn open_palette(workspace: &mut Workspace) {
 }
 
 /// Translate a key into the terminal's terms.
-fn terminal_key(event: &KeyEvent) -> Option<lide_terminal::Key> {
-    use lide_terminal::Key as TerminalKey;
+fn terminal_key(event: &KeyEvent) -> Option<crate::terminal::Key> {
+    use crate::terminal::Key as TerminalKey;
     let key = match &event.key {
         Key::Text(text) if cfg!(target_os = "macos") && event.mods.ctrl => {
             // On macOS Control is separate from Command, so Ctrl+C and
@@ -425,14 +425,14 @@ mod tests {
                 };
                 assert_eq!(
                     terminal_key(&control),
-                    Some(lide_terminal::Key::Control(character)),
+                    Some(crate::terminal::Key::Control(character)),
                     "Ctrl+{character:?} becomes a control byte"
                 );
             }
         } else {
             assert_eq!(
                 mapped,
-                Some(lide_terminal::Key::Control('c')),
+                Some(crate::terminal::Key::Control('c')),
                 "Ctrl+C interrupts on Linux"
             );
         }

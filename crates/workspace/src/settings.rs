@@ -162,7 +162,7 @@ impl Settings {
             return Some(PathBuf::from(directory).join("settings.json"));
         }
         Some(
-            lide_platform::AppPaths::resolve()
+            crate::platform::AppPaths::resolve()
                 .config
                 .join("settings.json"),
         )
