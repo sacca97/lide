@@ -15,10 +15,10 @@ use lide_pdf::view::PdfView;
 pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {
     let mut strip = row()
         .w_full()
-        .h(33.0)
+        .h(32.0)
         .px(4.0)
-        .pt(3.0)
-        .gap(2.0)
+        .pt(4.0)
+        .gap(4.0)
         .items_end()
         .fill(k.c.bg_base);
 
@@ -52,17 +52,25 @@ pub(crate) fn tab_strip(s: &Workspace, k: &Kit) -> El {
         );
 
         if dirty {
-            content = content.child(el().size(6.0, 6.0).radius(3.0).fill(k.c.text_accent));
+            content = content.child(el().size(6.0, 6.0).radius(3.0).fill(k.c.text_muted));
         }
 
+        // The active tab carries the editor's one mark of "you are here": a
+        // short ink rule along its top edge, like a proof mark in the margin.
+        let mark = el()
+            .h(2.0)
+            .mx(10.0)
+            .radius(1.0)
+            .fill(if active { k.c.text_accent } else { k.c.text_accent.alpha(0.0) });
         let tab = col()
             .key(format!("tab-{index}"))
-            .h(29.0)
+            .h(28.0)
             .max_w(200.0)
             .shrink()
             .radius(6.0)
             .border(1.0, if active { k.c.border_base } else { k.c.border_base.alpha(0.0) })
             .fill(if active { k.c.page } else { k.c.bg_base })
+            .child(mark)
             .child(
                 content.child(
                     col()

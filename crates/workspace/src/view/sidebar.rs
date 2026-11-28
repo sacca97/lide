@@ -188,7 +188,7 @@ fn places_panel(s: &Workspace, k: &Kit) -> El {
                 .child(
                     text(format!("{name}:{line}"))
                         .font(k.ty.text_xsmall)
-                        .color(k.c.text_accent)
+                        .color(k.c.text_base)
                         .min_w(0.0)
                         .truncate(),
                 ),
@@ -340,7 +340,7 @@ fn search_panel(s: &Workspace, k: &Kit) -> El {
                         .child(
                             text(format!("{name}:{line}"))
                                 .font(k.ty.small_medium)
-                                .color(k.c.text_accent)
+                                .color(k.c.text_base)
                                 .w_full()
                                 .min_w(0.0)
                                 .truncate(),
@@ -465,21 +465,17 @@ fn toggle_chip(label: &str, face: &str, on: bool, k: &Kit) -> El {
         .border(
             1.0,
             if on {
-                k.c.text_accent.alpha(0.6)
+                k.c.border_strong
             } else {
                 k.c.border_base.alpha(0.0)
             },
         )
-        .fill(if on {
-            k.c.text_accent.alpha(0.14)
-        } else {
-            k.c.bg_base
-        })
-        .hover(if on { k.c.text_accent.alpha(0.2) } else { k.c.hover })
+        .fill(if on { k.c.surface_raised_hover } else { k.c.bg_base })
+        .hover(if on { k.c.surface_raised_hover } else { k.c.hover })
         .child(
             text(face.to_string())
                 .font(k.ty.small_medium)
-                .color(if on { k.c.text_accent } else { k.c.text_weak }),
+                .color(if on { k.c.text_base } else { k.c.text_weak }),
         )
 }
 
@@ -541,7 +537,7 @@ fn node_row(
         .radius(5.0)
         .child(chevron)
         .child(icon(kind, 14.0).color(if current {
-            k.c.text_accent
+            k.c.text_base
         } else {
             k.c.text_weak
         }))

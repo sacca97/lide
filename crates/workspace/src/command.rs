@@ -439,6 +439,14 @@ impl Command {
             .map(|spec| spec.label)
             .unwrap_or("Unknown command")
     }
+
+    /// The shortcut, as it is written in menus, when the command has one.
+    pub fn shortcut(self) -> Option<&'static str> {
+        COMMANDS
+            .iter()
+            .find(|spec| spec.command == self)
+            .and_then(|spec| spec.shortcut)
+    }
 }
 
 /// The recent lists the palette offers.

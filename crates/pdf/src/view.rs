@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
 
-use rune_kit::{Button, ControlSize, Kit};
+use rune_kit::Kit;
 use rune::{El, Image, ImageCache, col, el, row, text};
 
 use rune_edit::TextEdit;
@@ -367,8 +367,13 @@ impl PdfView {
         else {
             return;
         };
-        // Leave room for the scroll bar and a margin.
-        let scale = ((width - 24.0) / page_width).clamp(MIN_SCALE, 1.0);
+        // Leave room for the desk's margin on both sides and the scroll bar.
+        let scale = ((width - 56.0) / page_width).clamp(MIN_SCALE, 1.0);
+        // A scroll bar coming and going changes the width by a few points;
+        // re-rendering the page for that would only make it flicker.
+        if (scale - self.scale).abs() / self.scale.max(0.01) < 0.03 {
+            return;
+        }
         self.set_scale(scale);
     }
 
@@ -744,81 +749,74 @@ impl PdfView {
         let mut header = row()
             .w_full()
             .h(40.0)
-            .px(10.0)
-            .gap(8.0)
+            .px(12.0)
+            .gap(12.0)
             .center_y()
             .fill(k.c.bg_base)
             .child(
                 row()
-                    .gap(3.0)
+                    .gap(4.0)
                     .center_y()
                     .child({
                         let lens = lens.clone();
                         let reset = scroll_key.clone();
-                        Button::new("‹")
-                            .control_size(ControlSize::Mini)
-                            .help("Previous page")
-                            .disabled(self.page == 0)
+                        tool_button(&PREVIOUS, "Previous page", self.page > 0, k)
+                            .key(format!("pdf-prev-page-{pane}"))
                             .on_press_tx(move |s: &mut S, tx: &mut rune::Tx| {
                                 lens(s).previous_page();
                                 tx.scroll_to_instant(&reset, 0.0, 0.0);
                             })
-                            .build(k)
-                            .key(format!("pdf-prev-page-{pane}"))
                     })
                     .child(
                         text(format!("{} / {}", self.page + 1, self.page_count()))
                             .font(k.ty.small)
-                            .color(k.c.text_weak),
+                            .color(k.c.text_muted)
+                            .px(4.0),
                     )
                     .child({
                         let lens = lens.clone();
                         let reset = scroll_key.clone();
-                        Button::new("›")
-                            .control_size(ControlSize::Mini)
-                            .help("Next page")
-                            .disabled(self.page + 1 >= self.page_count())
+                        tool_button(&NEXT, "Next page", self.page + 1 < self.page_count(), k)
+                            .key(format!("pdf-next-page-{pane}"))
                             .on_press_tx(move |s: &mut S, tx: &mut rune::Tx| {
                                 lens(s).next_page();
                                 tx.scroll_to_instant(&reset, 0.0, 0.0);
                             })
-                            .build(k)
-                            .key(format!("pdf-next-page-{pane}"))
                     }),
             )
-            .child(el().w(1.0).h(14.0).fill(k.c.border_base))
+            .child(el().w(1.0).h(16.0).fill(k.c.border_base))
             .child(
                 row()
-                    .gap(3.0)
+                    .gap(4.0)
                     .center_y()
                     .child({
                         let lens = lens.clone();
-                        Button::new("−")
-                            .control_size(ControlSize::Mini)
-                            .help("Zoom out")
-                            .disabled(self.scale <= MIN_SCALE)
-                            .on_press(move |s: &mut S| lens(s).zoom_out())
-                            .build(k)
+                        tool_button(&ZOOM_OUT, "Zoom out", self.scale > MIN_SCALE, k)
                             .key(format!("pdf-zoom-out-{pane}"))
+                            .on_press(move |s: &mut S| lens(s).zoom_out())
                     })
                     .child({
                         let lens = lens.clone();
-                        Button::new(format!("{:.0}%", self.scale * 100.0))
-                            .control_size(ControlSize::Mini)
-                            .help("Actual size")
-                            .on_press(move |s: &mut S| lens(s).reset_zoom())
-                            .build(k)
+                        col()
                             .key(format!("pdf-zoom-reset-{pane}"))
+                            .label("Actual size")
+                            .h(24.0)
+                            .w(48.0)
+                            .center()
+                            .radius(6.0)
+                            .hover(k.c.surface_base)
+                            .on_press(move |s: &mut S| lens(s).reset_zoom())
+                            .child(
+                                text(format!("{:.0}%", self.scale * 100.0))
+                                    .font(k.ty.small)
+                                    .color(k.c.text_muted),
+                            )
                     })
                     .child({
                         let lens = lens.clone();
-                        Button::new("+")
-                            .control_size(ControlSize::Mini)
-                            .help("Zoom in")
-                            .disabled(self.scale >= MAX_SCALE)
-                            .on_press(move |s: &mut S| lens(s).zoom_in())
-                            .build(k)
+                        tool_button(&ZOOM_IN, "Zoom in", self.scale < MAX_SCALE, k)
                             .key(format!("pdf-zoom-in-{pane}"))
+                            .on_press(move |s: &mut S| lens(s).zoom_in())
                     }),
             )
             .child({
@@ -826,7 +824,11 @@ impl PdfView {
                 let on_change = lens.clone();
                 rune_kit::TextInput::new(&self.search)
                     .placeholder("Find in page")
-                    .width(Some(150.0))
+                    .width(Some(176.0))
+                    .height(24.0)
+                    .text_style(k.ty.small)
+                    .leading_icon(k.glyph.search)
+                    .leading_icon_size(12.0)
                     .on_edit(move |s: &mut S| &mut on_edit(s).search)
                     .on_change(move |s: &mut S, _tx| {
                         let view = on_change(s);
@@ -846,10 +848,9 @@ impl PdfView {
                         .color(k.c.text_weak),
                 )
                 .child(
-                    rune_kit::Button::new("Next")
-                        .help("Next match")
-                        .on_press(move |s: &mut S| lens(s).next_match())
-                        .build(k),
+                    tool_button(&NEXT, "Next match", true, k)
+                        .key(format!("pdf-next-match-{pane}"))
+                        .on_press(move |s: &mut S| lens(s).next_match()),
                 );
         }
 
@@ -1040,8 +1041,32 @@ impl PdfView {
                     }
                 })
                 .center_y()
-                .padding(16.0)
-                .child(page)
+                .padding(24.0)
+                // The page lies on the desk: the area around it is the deepest
+                // surface, and the sheet casts a small contact shadow and a
+                // soft one below, as paper does.
+                .fill(k.c.bg_deep)
+                .child(k.elevate(
+                    page,
+                    &[
+                        rune::Shadow {
+                            x: 0.0,
+                            y: 1.0,
+                            blur: 2.0,
+                            spread: 0.0,
+                            color: rune::color::hex("#000000").expect("black").alpha(0.22),
+                            inset: false,
+                        },
+                        rune::Shadow {
+                            x: 0.0,
+                            y: 8.0,
+                            blur: 24.0,
+                            spread: -4.0,
+                            color: rune::color::hex("#000000").expect("black").alpha(0.28),
+                            inset: false,
+                        },
+                    ],
+                ))
         } else {
             col()
                 .grow(1.0)
@@ -1381,3 +1406,49 @@ fn render_worker(
         let _ = results.send(result);
     }
 }
+
+/// A square button in the PDF toolbar: one icon, 24 points, the height of the
+/// search field beside it, so the whole toolbar sits on one line.
+fn tool_button(glyph: &'static rune::Icon, label: &str, enabled: bool, k: &Kit) -> El {
+    let button = col()
+        .label(label.to_string())
+        .size(24.0, 24.0)
+        .radius(6.0)
+        .center()
+        .child(rune::icon(glyph, 16.0).color(if enabled {
+            k.c.text_muted
+        } else {
+            k.c.text_faint.alpha(0.5)
+        }));
+    if enabled {
+        button.hover(k.c.surface_base)
+    } else {
+        button
+    }
+}
+
+// The toolbar's icons, drawn on the editor's 16-point grid with its 1.25
+// stroke so they read as the same set as the rest of the chrome.
+static PREVIOUS: rune::Icon = rune::Icon {
+    name: "lide-pdf-previous",
+    view: 16.0,
+    body: r#"<path d="M10 3.5L5.5 8L10 12.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static NEXT: rune::Icon = rune::Icon {
+    name: "lide-pdf-next",
+    view: 16.0,
+    body: r#"<path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+static ZOOM_OUT: rune::Icon = rune::Icon {
+    name: "lide-pdf-zoom-out",
+    view: 16.0,
+    body: r#"<path d="M4 8H12" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
+};
+
+static ZOOM_IN: rune::Icon = rune::Icon {
+    name: "lide-pdf-zoom-in",
+    view: 16.0,
+    body: r#"<path d="M4 8H12M8 4V12" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
+};

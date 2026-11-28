@@ -283,12 +283,32 @@ fn double_clicking_the_pdf_lands_on_the_source_line() {
         }
     }
 
-    // The page is fitted to the pane once its width is known; let that settle.
-    for _ in 0..60 {
+    // The page is fitted to the pane once its width is known, and drawn again
+    // at that size; wait until it has stopped moving.
+    let mut last = [0.0f32; 4];
+    let mut steady = 0;
+    for _ in 0..600 {
         if rt.state.poll() {
             rt.invalidate();
         }
         rt.frame(1.0 / 60.0);
+        let now = rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some("pdf-page-1"))
+            .map(|element| element.rect);
+        match now {
+            Some(rect) if rect == last => steady += 1,
+            Some(rect) => {
+                last = rect;
+                steady = 0;
+            }
+            None => steady = 0,
+        }
+        if steady >= 10 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
     let page = rect(&rt, "pdf-page-1");
     let scale = {
@@ -332,7 +352,17 @@ fn double_clicking_the_pdf_lands_on_the_source_line() {
             .scroll_requests
             .iter()
             .any(|(key, _, _)| key == "editor-scroll-0"),
-        "the source is scrolled to the line: {:?} notice {:?}", rt.state.scroll_requests, rt.state.notice
+        "the source is scrolled to the line: {:?} notice {:?} page {:?} scale {} pointer {:?} focused {} cursor {:?}",
+        rt.state.scroll_requests,
+        rt.state.notice,
+        page,
+        scale,
+        match &rt.state.documents[rt.state.split_document.unwrap()] {
+            lide_workspace::Document::Pdf(view) => view.pointer,
+            _ => None,
+        },
+        rt.state.focused_pane,
+        rt.state.active_document().and_then(|d| d.editor()).map(|e| e.cursor_line())
     );
 
     let _ = std::fs::remove_dir_all(&directory);

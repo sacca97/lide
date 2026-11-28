@@ -110,8 +110,8 @@ pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
     let mut bar = row()
         .w_full()
         .h(24.0)
-        .px(10.0)
-        .gap(14.0)
+        .px(12.0)
+        .gap(16.0)
         .center_y()
         .fill(k.c.bg_base);
 
@@ -119,6 +119,13 @@ pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
         text(label.clone())
             .font(k.ty.small)
             .color(if strong { k.c.text_base } else { k.c.text_weak })
+    };
+    // On the right, the figure that changes as you work (the cursor, the page)
+    // is one step brighter than the labels around it, and no more.
+    let meta = |label: &String, strong: bool| {
+        text(label.clone())
+            .font(k.ty.small)
+            .color(if strong { k.c.text_muted } else { k.c.text_weak })
     };
 
     // The sidebar is hidden by default; this is the always-visible way back.
@@ -166,7 +173,7 @@ pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
                 .key("sync-pdf")
                 .label("Jump between the LaTeX source and its PDF")
                 .font(k.ty.small_medium)
-                .color(k.c.text_accent)
+                .color(k.c.text_muted)
                 .px(6.0)
                 .py(1.0)
                 .radius(4.0)
@@ -191,7 +198,7 @@ pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
                 })
                 .font(k.ty.small_medium)
                 .color(if outline {
-                    k.c.text_accent
+                    k.c.text_base
                 } else {
                     k.c.text_weak
                 })
@@ -208,12 +215,12 @@ pub(crate) fn status_bar(s: &Workspace, k: &Kit) -> El {
         row()
             .grow(1.0)
             .min_w(0.0)
-            .gap(14.0)
+            .gap(16.0)
             .center_y()
             .children(left.iter().map(|(label, strong)| item(label, *strong).truncate())),
     );
     for (label, strong) in &right {
-        bar = bar.child(item(label, *strong));
+        bar = bar.child(meta(label, *strong));
     }
 
     bar

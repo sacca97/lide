@@ -1136,10 +1136,17 @@ impl Workspace {
         let pane = pane as u8;
         self.pdf_presses
             .retain(|(at, other, _, _)| now - *at < 0.8 && *other == pane);
+        // The presses are in PDF points; a hand's tolerance is in points on
+        // screen, which at a small zoom are many PDF points.
+        let index = if pane == 1 { self.split_document } else { Some(self.active) };
+        let scale = match index.and_then(|index| self.documents.get(index)) {
+            Some(Document::Pdf(view)) => view.scale().max(0.01),
+            _ => 1.0,
+        };
         if let Some((at, _, before_x, before_y)) = self.pdf_presses.last().copied() {
             if now - at < 0.45
-                && (before_x - x).abs() < 14.0
-                && (before_y - y).abs() < 14.0
+                && (before_x - x).abs() * scale < 14.0
+                && (before_y - y).abs() * scale < 14.0
             {
                 self.pdf_double_click = Some(pane);
             }
